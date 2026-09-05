@@ -60,7 +60,8 @@ def _config(args) -> Config:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m mlc", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["graph", "show", "source", "passes", "run"])
+    ap.add_argument("command",
+                    choices=["graph", "show", "source", "passes", "run", "profile"])
     ap.add_argument("model")
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--seq", type=int, default=128)
@@ -95,6 +96,9 @@ def main(argv=None) -> int:
 
     if args.command == "run":
         return _run(model, inputs, graph, args)
+
+    if args.command == "profile":
+        return _profile(model, inputs, graph, args)
 
     cfg = _config(args)
     schedule = build_pipeline(graph, cfg)
@@ -162,6 +166,40 @@ def _run(model, inputs, graph, args) -> int:
     ok = err <= args.tol
     print("\nRESULT     " + ("ok" if ok else f"WRONG (tolerance {args.tol:.1e})"))
     return 0 if ok else 1
+
+
+def _profile(model, inputs, graph, args) -> int:
+    """Where the time goes, kernel by kernel."""
+    import collections
+
+    from .runtime.executor import CompiledModel
+
+    cfg = _config(args).replace(cuda_graphs=False)
+    compiled = CompiledModel(graph, build_pipeline(graph, cfg), cfg,
+                             torch.device(args.device))
+    rows = compiled.profile_kernels(inputs)
+    total = sum(ms for _, _, ms in rows)
+    by_kind: dict[str, float] = collections.defaultdict(float)
+    counts: dict[str, int] = collections.defaultdict(int)
+    for name, summary, ms in rows:
+        kind = summary.split(": ")[1].split()[0] if ": " in summary else "?"
+        by_kind[kind] += ms
+        counts[kind] += 1
+
+    print(f"{len(rows)} kernels, {total:.3f} ms total device time\n")
+    print(f"{'kind':12s} {'count':>6s} {'ms':>9s} {'share':>7s}")
+    for kind, ms in sorted(by_kind.items(), key=lambda kv: -kv[1]):
+        print(f"{kind:12s} {counts[kind]:6d} {ms:9.3f} {100 * ms / total:6.1f}%")
+
+    print(f"\nslowest 15 kernels:\n{'ms':>8s} {'share':>7s}  kernel")
+    for name, summary, ms in sorted(rows, key=lambda r: -r[2])[:15]:
+        print(f"{ms:8.4f} {100 * ms / total:6.1f}%  {summary}")
+
+    print(f"\ngenerated kernels only (what a better codegen could improve):")
+    gen = [r for r in rows if "extern" not in r[1]]
+    gen_ms = sum(r[2] for r in gen)
+    print(f"  {len(gen)} kernels, {gen_ms:.3f} ms, {100 * gen_ms / total:.1f}% of device time")
+    return 0
 
 
 def _passes(model, inputs, graph) -> int:

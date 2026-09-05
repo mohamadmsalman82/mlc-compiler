@@ -306,6 +306,51 @@ class CompiledModel:
         self._static_inputs = static
         self._static_outputs = self._collect(buffers)
 
+    def profile_kernels(self, inputs, iters: int = 20) -> list[tuple]:
+        """Per-kernel device time, in schedule order.
+
+        Times each kernel on its own with CUDA events, over the fully bound
+        plan, so the numbers are what the kernel costs in place rather than in
+        isolation. Returns (name, summary, milliseconds) sorted by cost.
+        """
+        if self.device.type != "cuda":
+            raise ExecutionError("kernel profiling needs a CUDA device")
+        buffers = self._resident_buffers(inputs)
+        if self._plan is None:
+            self._plan = self._build_plan(buffers)
+
+        def run(entry):
+            kind, payload = entry
+            if kind == "triton":
+                fn, grid, args, consts = payload
+                fn[grid](*args, **consts)
+            elif kind == "extern":
+                run_bound_extern(payload)
+            elif kind == "pointwise":
+                torch_backend.run_pointwise(*payload)
+            else:
+                torch_backend.run_reduction(*payload)
+
+        for _ in range(3):
+            self.run_kernels(buffers)
+        torch.cuda.synchronize()
+
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        out = []
+        for kernel, entry in zip(self.schedule.kernels, self._plan):
+            for _ in range(3):
+                run(entry)
+            torch.cuda.synchronize()
+            start.record()
+            for _ in range(iters):
+                run(entry)
+            end.record()
+            end.synchronize()
+            out.append((kernel.name, kernel.summary(),
+                        start.elapsed_time(end) / iters))
+        return out
+
     # -- introspection -----------------------------------------------------
     def source(self) -> str:
         if self._module is None:
