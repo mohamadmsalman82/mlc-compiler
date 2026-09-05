@@ -95,34 +95,57 @@ class PointwiseKernel(Kernel):
 
 
 @dataclass
+class Bind:
+    """One pointwise value computed inside a reduction kernel."""
+
+    name: str
+    expr: Expr
+
+
+@dataclass
+class Reduce:
+    """One block-level reduction over the column axis."""
+
+    name: str
+    kind: str  # "sum" | "max" | "min" | "prod"
+    expr: Expr
+
+
+Step = Bind | Reduce
+
+
+@dataclass
 class ReductionKernel(Kernel):
     """A persistent kernel: one row per thread block.
 
-    The kernel loads a whole row of ``reduce_numel`` elements, runs a sequence
-    of ``stages`` over it -- each stage being a pointwise prologue followed by
-    a block-level reduce -- and then evaluates an epilogue that may reference
-    any stage result. Keeping the row resident is what lets producers and
-    consumers fuse in without a second trip through HBM.
+    ``steps`` is a single ordered list rather than a prologue/reduce/epilogue
+    split, because real reductions interleave. Softmax is
+    ``bind, reduce(max), bind, bind, reduce(sum), bind``: the subtract and the
+    exponential sit *between* the two reductions, and each reduce may read any
+    earlier result. Layer norm is the same shape with two reduces sharing one
+    load of the row.
+
+    Everything a step computes lives in registers for the life of the kernel.
+    A value that does not vary along the column axis -- a reduction result, a
+    per-row bias -- is a scalar there, and Triton broadcasts it against the
+    column vector for free. That is what makes both fusion directions work:
+    producers feed the reduce without a store, and consumers read the result
+    without a reload.
     """
 
-    #: shape of the kept (non-reduced) dimensions; one program per point
+    #: shape of the kept dimensions; one program per point
     row_space: tuple[int, ...]
-    #: shape of the reduced dimensions, flattened by the backend
+    #: shape of the reduced dimensions, flattened into the column axis
     reduce_space: tuple[int, ...]
     inputs: list[KernelArg]
     outputs: list[KernelArg]
-    #: prologue evaluated once per (row, column) element
-    prologue: list[tuple[str, Expr]]
-    #: ordered reduce stages: (result_name, kind, expr_over_row)
-    stages: list["ReduceStage"]
-    #: epilogue evaluated per element again, may use stage results via Ref
-    epilogue: list[tuple[str, Expr]]
+    steps: list[Step]
     out_expr: dict[str, Expr]
-    #: outputs whose shape is row_space rather than the full element space
+    #: names of outputs that live in row space, stored once per program
     row_outputs: set[str] = field(default_factory=set)
     nodes: list[Node] = field(default_factory=list)
-    #: True when the row does not fit the register/SRAM budget and the kernel
-    #: has to stream it twice instead of holding it.
+    #: True when the row does not fit the register budget, so each reduce
+    #: streams the row in chunks instead of holding it
     two_pass: bool = False
 
     @property
@@ -133,6 +156,10 @@ class ReductionKernel(Kernel):
     def n_rows(self) -> int:
         return math.prod(self.row_space) if self.row_space else 1
 
+    @property
+    def reduces(self) -> list["Reduce"]:
+        return [s for s in self.steps if isinstance(s, Reduce)]
+
     def reads(self) -> list[Value]:
         return [a.value for a in self.inputs]
 
@@ -141,21 +168,10 @@ class ReductionKernel(Kernel):
 
     def summary(self) -> str:
         ops = ", ".join(n.op.split(".")[-2] for n in self.nodes)
-        kinds = "+".join(s.kind for s in self.stages)
-        mode = "two-pass" if self.two_pass else "persistent"
+        kinds = "+".join(r.kind for r in self.reduces) or "none"
+        mode = "streamed" if self.two_pass else "persistent"
         return (f"{self.name}: reduction {self.n_rows}x{self.reduce_numel} "
-                f"{kinds} ({mode}) [{ops}]")
-
-
-@dataclass
-class ReduceStage:
-    """One block-level reduction over the loaded row."""
-
-    name: str
-    kind: str  # "sum" | "max" | "min" | "prod"
-    expr: Expr
-    #: True when the stage may reference earlier stage results
-    depends: tuple[str, ...] = ()
+                f"{kinds} ({mode}) {len(self.inputs)}in {len(self.outputs)}out [{ops}]")
 
 
 @dataclass

@@ -94,11 +94,18 @@ except ImportError:  # pragma: no cover - depends on the installed Triton
         from triton.language.extra.cuda import libdevice as _math
     except ImportError:
         _math = tl.math
+
+
+@triton.jit
+def _prod_combine(a, b):
+    return a * b
 '''
 
 
 @dataclass
 class LaunchSpec:
+    """Grid and compile-time constants for one kernel launch."""
+
     grid: int
     constants: dict
     num_warps: int

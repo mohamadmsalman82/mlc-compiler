@@ -125,11 +125,10 @@ def _estimate_ops(node: Node) -> int:
     return 12 if tail in expensive else 2
 
 
-def fuse_elementwise(graph: Graph, cfg: Config, uses: UseInfo) -> GroupGraph:
+def fuse_elementwise(graph: Graph, gg: GroupGraph, cfg: Config, uses: UseInfo) -> None:
     """Greedy maximal fusion of pointwise chains, in program order."""
-    gg = GroupGraph(graph)
     if not cfg.elementwise_fusion:
-        return gg
+        return
 
     for node in gg.nodes:
         if not is_pointwise(node.op):
@@ -155,7 +154,6 @@ def fuse_elementwise(graph: Graph, cfg: Config, uses: UseInfo) -> GroupGraph:
             if not _worth_merging(gg, gi, gj, space, uses, member_ids, cfg):
                 continue
             gi = gg.merge(gi, gj)
-    return gg
 
 
 def _worth_merging(gg, gi, gj, space, uses, member_ids, cfg: Config) -> bool:
@@ -317,15 +315,22 @@ def _sorted_nodes(graph: Graph, nodes) -> list[Node]:
 
 
 def plan(graph: Graph, cfg: Config) -> list[KernelGroup]:
-    """Run the fusion passes and return the final grouping, in order."""
+    """Run the fusion passes and return the final grouping, in order.
+
+    Elementwise first, so reduction fusion sees whole pointwise chains rather
+    than individual ops, then reduction fusion over the same group graph so
+    the acyclicity check covers both. Recompute runs last, on the materialised
+    groups, because duplicating a node puts it in two groups at once and
+    union-find cannot represent that.
+    """
+    from .reduction_fusion import fuse_reductions
+
     uses = UseInfo(graph)
-    gg = fuse_elementwise(graph, cfg, uses)
+    gg = GroupGraph(graph)
+    fuse_elementwise(graph, gg, cfg, uses)
+    fuse_reductions(graph, gg, cfg, uses)
     groups = [KernelGroup(_sorted_nodes(graph, gg.group_members(r)))
               for r in gg.roots_in_order()]
-    if cfg.reduction_fusion:
-        from .reduction_fusion import fuse_reductions
-
-        groups = fuse_reductions(graph, groups, cfg, uses)
     groups = apply_recompute(graph, groups, cfg, uses)
     _validate(groups)
     return groups
