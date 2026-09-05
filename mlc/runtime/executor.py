@@ -242,6 +242,13 @@ class CompiledModel:
         return self._collect(buffers)
 
     def _collect(self, buffers: dict[str, torch.Tensor]):
+        """Views onto the output buffers.
+
+        These alias storage the next call will overwrite, which is the same
+        contract ``torch.compile(mode="reduce-overhead")`` has and the reason
+        a captured graph can hand back results at all. Clone the result if it
+        has to outlive the next call.
+        """
         outs = [v.layout.as_torch(buffers[v.buffer.name]) for v in self.graph.outputs]
         spec = self.graph.meta.get("out_spec")
         if spec is not None:

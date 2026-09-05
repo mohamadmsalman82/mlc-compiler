@@ -115,3 +115,57 @@ def test_different_inputs_give_different_answers():
     other = (torch.randn_like(args[0]),)
     torch.testing.assert_close(compiled(*other), _reference(model, other), **TOL)
     assert not torch.allclose(compiled(*other), compiled(*args))
+
+
+# -- output aliasing -------------------------------------------------------
+
+PLANNED = Config(cuda_graphs=False)
+
+
+def test_outputs_alias_buffers_the_next_call_overwrites():
+    """Once the buffer table is resident, results are views onto storage the
+    next call reuses. This is the same contract torch.compile's
+    reduce-overhead mode has, and it is a footgun worth pinning: a test that
+    compares two calls' results without cloning compares a tensor with
+    itself."""
+    torch.manual_seed(0)
+    _, model, args = next(t for t in all_models() if t[0] == "mlp")
+    compiled = mlc.compile(model, args, PLANNED)
+    other = (torch.randn_like(args[0]),)
+
+    first = compiled(*args)
+    kept = first.clone()
+    second = compiled(*other)
+    assert first.data_ptr() == second.data_ptr(), "expected the same storage"
+    assert not torch.allclose(kept, second), "the two inputs should differ"
+    torch.testing.assert_close(second, _reference(model, other), **TOL)
+    torch.testing.assert_close(compiled(*args), kept, **TOL)
+
+
+def test_planned_model_is_correct_across_alternating_inputs():
+    """Alternating inputs through a resident buffer table, which is where a
+    stale cached pointer or a missed input copy would show up."""
+    torch.manual_seed(0)
+    _, model, args = next(t for t in all_models() if t[0] == "block")
+    compiled = mlc.compile(model, args, PLANNED)
+    a = args
+    b = (torch.randn_like(args[0]),)
+    want_a = _reference(model, a)
+    want_b = _reference(model, b)
+    for _ in range(3):
+        torch.testing.assert_close(compiled(*a), want_a, **TOL)
+        torch.testing.assert_close(compiled(*b), want_b, **TOL)
+
+
+def test_input_is_copied_not_aliased():
+    """Mutating the caller's tensor after a call must not change the result,
+    and must not corrupt the next one."""
+    torch.manual_seed(0)
+    _, model, args = next(t for t in all_models() if t[0] == "mlp")
+    compiled = mlc.compile(model, args, PLANNED)
+    live = args[0].clone()
+    want = _reference(model, (live.clone(),))
+    got = compiled(live).clone()
+    torch.testing.assert_close(got, want, **TOL)
+    live.zero_()
+    torch.testing.assert_close(compiled(args[0]), _reference(model, args), **TOL)
