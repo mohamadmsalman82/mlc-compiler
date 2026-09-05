@@ -29,6 +29,35 @@ import torch
 
 from ..devices import MB, DeviceProfile, profile_for
 
+# Imported at module level, not inside the measurement function: Triton
+# resolves a kernel's names from its module globals, so a `tl` bound in a
+# local scope is invisible to the compiler and the kernel fails to build.
+try:
+    import triton
+    import triton.language as tl
+
+    HAVE_TRITON = True
+except ImportError:  # pragma: no cover - depends on the platform
+    HAVE_TRITON = False
+
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _fma_chain(x_ptr, out_ptr, N: tl.constexpr, CHAIN: tl.constexpr,
+                   BLOCK: tl.constexpr):
+        """A long dependent chain of fused multiply-adds over one block.
+
+        The chain is dependent on purpose: an independent one would measure
+        issue width rather than throughput, and it is unrolled at compile time
+        so the loop itself costs nothing.
+        """
+        idx = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        acc = tl.load(x_ptr + idx, mask=idx < N, other=0.0)
+        for _ in tl.static_range(CHAIN):
+            acc = acc * 1.0000001 + 0.0000001
+        tl.store(out_ptr + idx, acc, mask=idx < N)
+
 
 def _time_cuda(fn, iters: int, warmup: int = 5) -> float:
     """Seconds per call, measured with CUDA events."""
@@ -90,26 +119,13 @@ def measure_graph_launch_overhead(device, nodes: int = 512) -> float:
 def measure_fp32_throughput(device, n: int = 1 << 20, chain: int = 512) -> float:
     """Operations per second for pointwise fp32 arithmetic.
 
-    Needs a Triton kernel: a chain of fused multiply-adds in torch would be a
-    chain of kernel launches, and would measure bandwidth instead. Returns 0
-    when Triton is unavailable, and the caller falls back to the table.
+    Needs a Triton kernel: a chain of fused multiply-adds written in torch
+    would be a chain of kernel launches, and would measure bandwidth instead.
+    Returns 0 when Triton is unavailable, and the caller falls back to the
+    published figure.
     """
-    try:
-        import triton
-        import triton.language as tl
-    except ImportError:
+    if not HAVE_TRITON:
         return 0.0
-
-    @triton.jit
-    def _fma_chain(x_ptr, out_ptr, N: tl.constexpr, CHAIN: tl.constexpr,
-                   BLOCK: tl.constexpr):
-        idx = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-        v = tl.load(x_ptr + idx, mask=idx < N, other=0.0)
-        acc = v
-        for _ in tl.static_range(CHAIN):
-            acc = acc * 1.0000001 + 0.0000001
-        tl.store(out_ptr + idx, acc, mask=idx < N)
-
     x = torch.randn(n, device=device)
     out = torch.empty_like(x)
     block = 1024
