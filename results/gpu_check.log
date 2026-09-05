@@ -1,0 +1,139 @@
+
+=============== environment ===============
+
+Sat Sep  5 15:56:31 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.159.04             Driver Version: 580.159.04     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A40                     On  |   00000000:D6:00.0 Off |                    0 |
+|  0%   27C    P8             32W /  300W |       0MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+python 3.11.10 (main, Sep  7 2024, 18:35:41) [GCC 11.4.0]
+torch 2.4.1+cu124 | cuda True
+device NVIDIA A40 | sm 8.6 | vram 44.4 GiB
+triton 3.0.0
+
+=============== test suite (does not touch the GPU) ===============
+
+........................................................................ [ 12%]
+........................................................................ [ 24%]
+........................................................................ [ 37%]
+.........................................................s.............. [ 49%]
+........................................................................ [ 62%]
+........................................................................ [ 74%]
+........................................................................ [ 87%]
+........................................................................ [ 99%]
+..                                                                       [100%]
+577 passed, 1 skipped in 152.59s (0:02:32)
+
+=============== smallest model through Triton ===============
+
+model      gpt-small  batch=1 seq=128
+device     cuda   backend  triton
+kernels    52  ({'extern': 27, 'reduction': 13, 'pointwise': 12})
+compiled   0.09s
+memory     memory: arena 1280.0 KiB, lower bound 1152.0 KiB (1.11x), unplanned would be 13696.0 KiB
+max error  1.953e-03 vs eager
+
+RESULT     ok
+
+=============== full-size models ===============
+
+model      bert-base  batch=1 seq=128
+device     cuda   backend  triton
+kernels    200  ({'extern': 100, 'pointwise': 63, 'reduction': 37})
+compiled   0.65s
+memory     memory: arena 1728.2 KiB, lower bound 1728.2 KiB (1.00x), unplanned would be 56066.8 KiB
+max error  2.869e-03 vs eager
+
+RESULT     ok
+model      gpt2-small  batch=1 seq=128
+device     cuda   backend  triton
+kernels    148  ({'extern': 75, 'reduction': 37, 'pointwise': 36})
+compiled   0.47s
+memory     memory: arena 1920.0 KiB, lower bound 1728.0 KiB (1.11x), unplanned would be 60480.0 KiB
+max error  3.662e-03 vs eager
+
+RESULT     ok
+
+=============== cuda graph capture at batch 32 ===============
+
+model      bert-base  batch=32 seq=128
+device     cuda   backend  triton
+kernels    236  ({'extern': 100, 'pointwise': 99, 'reduction': 37})
+compiled   0.52s
+memory     memory: arena 55304.0 KiB, lower bound 55304.0 KiB (1.00x), unplanned would be 2009368.0 KiB
+max error  3.662e-03 vs eager
+
+RESULT     ok
+
+=============== streamed reduction path ===============
+
+model      bert-base  batch=1 seq=128
+device     cuda   backend  triton
+kernels    200  ({'extern': 100, 'pointwise': 63, 'reduction': 37})
+compiled   0.72s
+memory     memory: arena 1728.2 KiB, lower bound 1728.2 KiB (1.00x), unplanned would be 56066.8 KiB
+max error  3.113e-03 vs eager
+
+RESULT     ok
+
+=============== fp32, for comparison ===============
+
+model      bert-base  batch=1 seq=128
+device     cuda   backend  triton
+kernels    200  ({'extern': 100, 'pointwise': 63, 'reduction': 37})
+compiled   0.47s
+memory     memory: arena 3456.5 KiB, lower bound 3456.5 KiB (1.00x), unplanned would be 112132.5 KiB
+max error  8.047e-07 vs eager
+
+RESULT     ok
+
+=============== calibration ===============
+
+calibrating...
+NVIDIA A40 (measured): 561 GB/s, 28.0 TFLOP/s fp32, 6.9 us/launch (1.0 us captured), L2 6 MiB
+  -> flops_per_byte=49.8, launch_overhead_bytes=3851 KB (575 KB captured)
+  spec sheet says 696 GB/s and 37.4 TFLOP/s; measured is 81% and 75% of that
+# Benchmarks
+
+device: `cuda` (NVIDIA A40)
+torch: `2.4.1+cu124`  dtype: `float16`
+
+cost model:
+```
+NVIDIA A40 (measured): 561 GB/s, 28.0 TFLOP/s fp32, 6.9 us/launch (1.0 us captured), L2 6 MiB
+  -> flops_per_byte=49.8, launch_overhead_bytes=3851 KB (575 KB captured)
+```
+
+Note: L2 on this device is 6 MiB. Where the planned arena is smaller than that, the working set is L2-resident and fusion's benefit is launch overhead rather than bandwidth. Compare the arena size in `python -m mlc show`.
+
+### gpt-small  dtype=float16  batch=1  seq=128
+
+| variant | kernels | latency ms | vs eager | peak MB | max err |
+|---|---:|---:|---:|---:|---:|
+| eager |  | 1.855 | 1.00x | 56.8 | 0.0e+00 |
+| mlc/+memory | 52 | 1.051 | 1.77x | 55.7 | 2.0e-03 |
+
+Per-pass contribution (each row is the gain over the row above):
+
+| pass enabled | latency ms | gain |
+|---|---:|---:|
+| mlc/+memory | 1.051 | baseline |
+
+
+=============== all checks passed ===============
+send back gpu_check.log, then run scripts/gpu_bench.sh

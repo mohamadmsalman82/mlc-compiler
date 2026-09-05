@@ -11,4 +11,5 @@ results/*
 !results/RESULTS.md
 !results/*.json
 !results/inductor-comparison.md
+!results/gpu_check.log
 *.ncu-rep
