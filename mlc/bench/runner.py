@@ -60,6 +60,7 @@ class Result:
     batch: int
     seq: int
     variant: str
+    dtype: str = "float32"
     latency_ms: float = float("nan")
     latency_p10: float = float("nan")
     peak_mb: float = float("nan")
@@ -70,7 +71,7 @@ class Result:
     note: str = ""
 
     def key(self) -> tuple:
-        return (self.model, self.batch, self.seq)
+        return (self.model, self.batch, self.seq, self.dtype)
 
 
 # --------------------------------------------------------------------------
@@ -166,7 +167,7 @@ def run_one(model_name: str, batch: int, seq: int, device: torch.device,
 
     out: list[Result] = []
     for name in variants:
-        r = Result(model_name, batch, seq, name)
+        r = Result(model_name, batch, seq, name, str(dtype).replace("torch.", ""))
         try:
             t0 = time.perf_counter()
             fn, kernels, note = _build_variant(name, model, args, device, base)
