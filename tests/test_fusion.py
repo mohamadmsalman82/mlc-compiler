@@ -178,3 +178,61 @@ def test_views_never_become_kernels():
         for group in plan(g, FULL):
             for n in group.nodes:
                 assert op_class(n.op) is not OpClass.VIEW, f"{name}: {n.op} scheduled"
+
+
+# -- recompute across several consumers ------------------------------------
+
+class _SharedBroadcast(nn.Module):
+    """A [D] value feeding two [B, T, D] consumers. Recompute's whole reason
+    for existing, and the case a per-target escape check silently refused."""
+
+    def __init__(self, d=16, expensive=False):
+        super().__init__()
+        self.a = nn.Parameter(torch.randn(d))
+        self.b = nn.Parameter(torch.randn(d))
+        self.expensive = expensive
+
+    def forward(self, x):
+        g = self.a * 2.0 + self.b
+        if self.expensive:
+            g = torch.nn.functional.gelu(g)
+        return (x * g).relu(), (x + g).tanh()
+
+
+def test_recompute_fires_for_a_broadcast_producer_with_two_consumers():
+    model = _SharedBroadcast().eval()
+    args = (torch.randn(1, 4, 16),)
+    _, with_rc = _schedule(model, args, FULL)
+    _, without = _schedule(model, args, FULL.replace(recompute=False))
+    assert len(with_rc) < len(without), (
+        "the shared [D] producer should be duplicated into both consumers"
+    )
+    stored = {v.name for k in with_rc.kernels for v in k.writes()}
+    assert len(stored) == 2, "only the two results should reach memory"
+
+
+def test_recompute_refuses_when_the_iteration_space_makes_it_expensive():
+    """The same graph at a size where re-evaluating the producer costs more
+    arithmetic than the round trip and the launch are worth."""
+    model = _SharedBroadcast(d=768, expensive=True).eval()
+    small = (torch.randn(1, 4, 768),)
+    large = (torch.randn(32, 128, 768),)
+    _, at_small = _schedule(model, small, FULL)
+    _, at_large = _schedule(model, large, FULL)
+    assert len(at_small) < len(at_large), (
+        "recompute should pay at a small iteration space and not at a large one"
+    )
+
+
+def test_recompute_decision_follows_the_device():
+    """A device that retires more arithmetic per byte should be more willing
+    to recompute. If this stops holding, the cost model has gone inert."""
+    from mlc.passes.cost import evaluate_merge
+
+    model = _SharedBroadcast(d=768, expensive=True).eval()
+    args = (torch.randn(8, 128, 768),)
+    cheap_flops = FULL.replace(flops_per_byte=1.0)
+    rich_flops = FULL.replace(flops_per_byte=1e6)
+    _, stingy = _schedule(model, args, cheap_flops)
+    _, generous = _schedule(model, args, rich_flops)
+    assert len(generous) < len(stingy)

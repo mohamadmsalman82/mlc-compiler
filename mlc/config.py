@@ -40,15 +40,26 @@ class Config:
     #: Raising it makes the compiler more willing to recompute.
     flops_per_byte: float = 20.0
     #: cost of one kernel launch, expressed as the bytes the device could
-    #: have moved instead. ~3us at ~1.5 TB/s. Under CUDA graphs this is much
-    #: smaller, which is why cuda_graphs and fusion partly substitute.
+    #: have moved instead. ~3us at ~1.5 TB/s.
     launch_overhead_bytes: float = 4.5e6
+    #: the same cost once the schedule is replayed as a CUDA graph. Replay
+    #: removes almost all of the per-launch CPU work, so merging two kernels
+    #: purely to save a launch is worth much less. Fusion and capture partly
+    #: substitute for each other, and the cost model has to know that or it
+    #: will over-fuse whenever capture is on.
+    graph_launch_overhead_bytes: float = 1.1e6
     #: refuse to recompute an expression bigger than this many scalar ops
     max_recompute_ops: int = 32
 
     # -- misc --------------------------------------------------------------
     backend: str = "auto"  # "auto" | "triton" | "torch"
     debug: bool = False
+
+    @property
+    def effective_launch_bytes(self) -> float:
+        """What one saved launch is actually worth, given the capture setting."""
+        return (self.graph_launch_overhead_bytes if self.cuda_graphs
+                else self.launch_overhead_bytes)
 
     def replace(self, **kw) -> "Config":
         from dataclasses import replace as _r

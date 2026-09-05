@@ -118,6 +118,7 @@ before it as producers and the affine transform after it as an epilogue.
 pip install torch triton
 pytest tests/
 python -m mlc run bert-base --device cuda
+python -m mlc.bench --calibrate --models gpt-small --batches 1
 ```
 
 `run` compiles the model, executes it through the Triton backend, and checks
@@ -129,6 +130,14 @@ fallback to the reference backend cannot be mistaken for a passing GPU run.
 ```
 python -m mlc.bench --models bert-base gpt2-small --batches 1 8 32 --out results/bench.md
 ```
+
+The cost model's constants are device properties: `flops_per_byte` is about
+12 on an A100 and about 56 on a 4060, and launch overhead is 4.7 MB of forgone
+bandwidth on the first and under 1 MB on the second. `mlc/devices.py` has a
+table, and `--calibrate` measures them on the actual card instead, including
+the per-kernel cost under CUDA graph replay. These are not cosmetic: on
+BERT-base at batch 32 with capture on, the 4060 profile produces a different
+schedule than the A100 one.
 
 Variants run as a ladder -- no passes, elementwise, `+ reduction`,
 `+ memory`, `+ cuda-graphs` -- so the difference between adjacent rows is one

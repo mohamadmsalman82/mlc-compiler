@@ -89,7 +89,7 @@ def evaluate_merge(
     """
     benefit = float(sum(value_bytes(v) for v in saved_stores))
     benefit += float(sum(value_bytes(v) for v in saved_loads))
-    benefit += saved_launches * cfg.launch_overhead_bytes
+    benefit += saved_launches * cfg.effective_launch_bytes
 
     cost = float(sum(value_bytes(v) for v in extra_loads))
     if extra_evaluations > 0 and expr_ops > 0:

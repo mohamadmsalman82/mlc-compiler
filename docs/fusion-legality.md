@@ -81,12 +81,20 @@ whether the reduced positions are size 1 after right-alignment. A
 `keepdim=False` result has the reduced dimensions removed entirely and does
 not right-align against the element shape at all, so it is checked separately.
 
-Unlike the elementwise pass, **reduction kernels do not cross reshapes**. The
-same-element-count shortcut is not sound here: flat order depends on which
-frame you flatten in, and the row/column split makes those differ whenever the
-reduced axis is not trailing. Refusing is a missed optimisation, not a wrong
-answer, and the alternative is a class of bug that would only appear on
-reductions over interior axes.
+Reduction kernels cross reshapes **only when the reduced axes are trailing.**
+Then a row-major reshape leaves both the row order and the column axis
+untouched, and the value can be indexed by its own leading dimensions instead
+of the frame's: the two cover the same elements in the same order, and the
+canonical index maps come out equal. With an interior reduced axis the two
+orders genuinely differ and the reshape is refused.
+
+The guard is not academic. A transformer's residual add is `[B*T, D]` and the
+layer norm that follows it has element shape `[B, T, D]`. Without the rule
+they land in separate kernels and the add gets its own full pass over the
+activation, which on BERT-base at batch 32 is 24 extra kernels each moving
+12 MB. Batch size 1 hid this: with `B = 1` the reshape happens to be a
+right-aligned broadcast and slipped through the ordinary check, so the fusion
+appeared to work and only stopped working at every other batch size.
 
 ---
 
@@ -209,12 +217,25 @@ because inference on these models is memory bound.
 Two other effects are converted into that currency:
 
 - **arithmetic**, at `flops_per_byte` -- the operations the device retires
-  while moving one byte. About 12 for an A100 in fp32, about 40 for a 4090.
+  while moving one byte. About 12 for an A100 in fp32, about 56 for a 4060,
+  about 82 for a 4090.
 - **launch overhead**, at `launch_overhead_bytes` -- what one kernel launch
-  costs expressed as forgone bandwidth. Roughly 3 microseconds, which at
-  1.5 TB/s is several megabytes.
+  costs expressed as forgone bandwidth. Roughly 3 microseconds, which is
+  4.7 MB at an A100's 1.5 TB/s but under 1 MB at a 4060's 272 GB/s.
 
-Both are device properties and are meant to be set per GPU.
+Both are device properties. `mlc/devices.py` has a table of published
+specifications and `mlc.bench.calibrate` measures them on the actual card,
+which is preferable: vendor peak fp32 is not reachable by pointwise code, and
+launch overhead depends as much on the host CPU and the driver as on the GPU.
+
+**Capture changes the launch term.** Once the schedule is replayed as a CUDA
+graph most of the per-launch cost is gone, so a merge worth taking purely to
+eliminate a launch may not be worth taking any more. The model uses a separate
+`graph_launch_overhead_bytes` when capture is on. This is not a refinement: on
+BERT-base at batch 32 it changes the schedule, because recomputing a broadcast
+producer across four million iterations stops being worth one now-cheap
+launch. Fusion and capture partly substitute for each other, and a cost model
+that does not know it will over-fuse whenever capture is on.
 
 A merge is taken when
 
@@ -251,6 +272,29 @@ into many consumers on the strength of a favourable ratio.
 
 The pass runs after grouping rather than during it, because duplicating a node
 puts it in two kernels at once and union-find cannot represent that.
+
+The escape check here has to be made against the **union** of all the consumer
+groups, not against each one separately. After duplication every consumer
+holds its own copy, so a value read by two of them has not escaped anything.
+Checking one at a time refuses precisely the multi-consumer case the pass
+exists for, which is what it did until this was found by instrumenting the
+decisions rather than reading the code.
+
+### What the model actually decides
+
+Worth stating plainly, because it is easy to assume a cost model is doing more
+than it is. On BERT-base and GPT-2 at every batch size and device profile
+tested, **every legal elementwise and reduction merge is also profitable**, and
+the model accepts all of them. Fusing a pointwise chain is close to
+unconditionally good, and the model saying so is the correct answer rather
+than an idle one.
+
+Where it discriminates is recompute. A `[D]` value broadcast into a
+`[32, 128, D]` iteration space is re-evaluated four million times; when its
+expression contains a transcendental that costs more arithmetic than the round
+trip and the launch are worth, and the model refuses. The same graph at
+`[1, 4, D]` is duplicated happily. The decision also moves with the device: a
+card that retires more operations per byte recomputes more.
 
 ### Capacity
 

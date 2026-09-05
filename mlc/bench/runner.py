@@ -29,19 +29,25 @@ import torch
 import mlc
 from mlc.config import Config
 
-VARIANTS: dict[str, Config | None] = {
-    "eager": None,
-    "torch.compile": None,
-    "torch.compile/reduce-overhead": None,
-    "mlc/no-passes": Config(elementwise_fusion=False, recompute=False,
-                            reduction_fusion=False, memory_planning=False,
+#: Pass settings per variant, as overrides applied to the device's profile.
+#: The device supplies flops_per_byte and the launch-overhead constants; the
+#: variant supplies which passes run. Keeping them separate means the whole
+#: ladder is priced for the card it is running on.
+VARIANT_PASSES: dict[str, dict] = {
+    "eager": {},
+    "torch.compile": {},
+    "torch.compile/reduce-overhead": {},
+    "mlc/no-passes": dict(elementwise_fusion=False, recompute=False,
+                          reduction_fusion=False, memory_planning=False,
+                          cuda_graphs=False),
+    "mlc/elementwise": dict(reduction_fusion=False, memory_planning=False,
                             cuda_graphs=False),
-    "mlc/elementwise": Config(reduction_fusion=False, memory_planning=False,
-                              cuda_graphs=False),
-    "mlc/+reduction": Config(memory_planning=False, cuda_graphs=False),
-    "mlc/+memory": Config(cuda_graphs=False),
-    "mlc/+cuda-graphs": Config(),
+    "mlc/+reduction": dict(memory_planning=False, cuda_graphs=False),
+    "mlc/+memory": dict(cuda_graphs=False),
+    "mlc/+cuda-graphs": dict(),
 }
+
+VARIANTS = VARIANT_PASSES  # name kept for the CLI's default list
 
 #: Rows whose difference from the previous rung isolates one pass.
 LADDER = ["mlc/no-passes", "mlc/elementwise", "mlc/+reduction", "mlc/+memory",
@@ -125,7 +131,7 @@ def _max_err(got, want) -> float:
     return worst
 
 
-def _build_variant(name: str, model, args, device):
+def _build_variant(name: str, model, args, device, base: Config):
     """Returns (callable, kernel count, note) or raises."""
     if name == "eager":
         with torch.no_grad():
@@ -134,7 +140,7 @@ def _build_variant(name: str, model, args, device):
         mode = "reduce-overhead" if "reduce-overhead" in name else None
         compiled = torch.compile(model, mode=mode, fullgraph=False, dynamic=False)
         return (lambda *a: _no_grad_call(compiled, a)), 0, mode or "default"
-    cfg = VARIANTS[name]
+    cfg = base.replace(**VARIANT_PASSES[name])
     compiled = mlc.compile(model, args, cfg, device=device)
     return compiled, len(compiled.schedule), compiled.backend
 
@@ -146,9 +152,11 @@ def _no_grad_call(model, args):
 
 def run_one(model_name: str, batch: int, seq: int, device: torch.device,
             variants: Sequence[str], iters: int = 100,
-            tolerance: float = 2e-3) -> list[Result]:
+            tolerance: float = 2e-3, base: Config | None = None) -> list[Result]:
+    from ..devices import profile_for
     from .models import build
 
+    base = base if base is not None else profile_for(device).to_config()
     model, args = build(model_name, batch, seq, device)
     with torch.no_grad():
         reference = model(*args)
@@ -158,7 +166,7 @@ def run_one(model_name: str, batch: int, seq: int, device: torch.device,
         r = Result(model_name, batch, seq, name)
         try:
             t0 = time.perf_counter()
-            fn, kernels, note = _build_variant(name, model, args, device)
+            fn, kernels, note = _build_variant(name, model, args, device, base)
             got = fn(*args)
             r.compile_s = time.perf_counter() - t0
             r.kernels = kernels
@@ -181,12 +189,12 @@ def run_one(model_name: str, batch: int, seq: int, device: torch.device,
 
 
 def run_suite(models: Sequence[str], batches: Sequence[int], seq: int,
-              device: torch.device, variants: Sequence[str] = tuple(VARIANTS),
-              iters: int = 100) -> list[Result]:
+              device: torch.device, variants: Sequence[str] = tuple(VARIANT_PASSES),
+              iters: int = 100, base: Config | None = None) -> list[Result]:
     results: list[Result] = []
     for m in models:
         for b in batches:
-            results.extend(run_one(m, b, seq, device, variants, iters=iters))
+            results.extend(run_one(m, b, seq, device, variants, iters=iters, base=base))
     return results
 
 

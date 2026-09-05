@@ -71,6 +71,18 @@ class Frame:
         return math.prod(self.row) if self.row else 1
 
     @property
+    def trailing(self) -> bool:
+        """True when the reduced axes are the last ones.
+
+        Only then is a row-major reshape of the element shape safe to index in
+        this frame: the flat order of the kept dimensions is unchanged and the
+        reduced axis is untouched. With an interior reduced axis the two
+        orders genuinely differ and a reshape has to be refused.
+        """
+        rank = len(self.element)
+        return self.reduce_dims == tuple(range(rank - len(self.col), rank))
+
+    @property
     def n_cols(self) -> int:
         return math.prod(self.col) if self.col else 1
 
@@ -157,7 +169,37 @@ def classify(shape: tuple[int, ...], frame: Frame) -> str | None:
             pass
     if (math.prod(shape) if shape else 1) == 1:
         return ROW
+    # A row-major reshape of the element or row shape. This is what a
+    # transformer's residual add looks like relative to the layer norm that
+    # follows it: the add is [B*T, D] and the norm's element shape is
+    # [B, T, D]. They flatten identically, so the same flat index means the
+    # same element, and the kernel can index the add's operands directly.
+    # Safe only when the reduced axes are trailing, hence the guard.
+    if frame.trailing:
+        k = len(frame.col)
+        if k and len(shape) > k and tuple(shape[-k:]) == frame.col:
+            if math.prod(shape[:-k]) == frame.n_rows:
+                return ELEMENT
+        if (math.prod(shape) if shape else 1) == frame.n_rows:
+            return ROW
     return ILLEGAL
+
+
+def frame_axes(shape: tuple[int, ...], frame: Frame) -> list[tuple[str, tuple[int, ...]]]:
+    """The (row, col) axis split to index a value of ``shape`` by.
+
+    Usually the frame's own split. For a reshaped element shape the row axis
+    uses that value's own leading dimensions instead, which cover the same
+    element count in the same order, so the index maps stay comparable with
+    everything else in the kernel.
+    """
+    shape = tuple(shape)
+    k = len(frame.col)
+    if (frame.trailing and k and len(shape) > k and shape[-k:] == frame.col
+            and math.prod(shape[:-k]) == frame.n_rows
+            and shape != frame.element):
+        return [("row", shape[:-k]), ("col", frame.col)]
+    return [("row", frame.row), ("col", frame.col)]
 
 
 def storable(shape: tuple[int, ...], frame: Frame) -> bool:

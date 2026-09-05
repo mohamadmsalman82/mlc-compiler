@@ -238,7 +238,7 @@ def apply_recompute(graph: Graph, groups: list[KernelGroup], cfg: Config,
                     consumer_groups.add(cg)
             if len(consumer_groups) < 2:
                 continue  # a single consumer is already handled by merging
-            if not all(_recompute_legal(groups[cg], g, uses) for cg in consumer_groups):
+            if not _recompute_legal(g, [groups[cg] for cg in consumer_groups], uses):
                 continue
             if not _recompute_profitable(graph, groups, gi, consumer_groups, produced, cfg):
                 continue
@@ -253,22 +253,32 @@ def apply_recompute(graph: Graph, groups: list[KernelGroup], cfg: Config,
     return groups
 
 
-def _recompute_legal(target: KernelGroup, producer: KernelGroup, uses: UseInfo) -> bool:
-    """May ``producer``'s nodes be evaluated inside ``target``'s kernel?
+def _recompute_legal(producer: KernelGroup, targets: list[KernelGroup],
+                     uses: UseInfo) -> bool:
+    """May ``producer``'s nodes be evaluated inside every one of ``targets``?
 
-    The same two rules as ordinary merging. The target must stay pointwise --
-    inlining a producer into a reduction is a different transform with its own
-    legality, and it belongs to the reduction pass. The merged node set must
-    have a coherent iteration space, and any node that ends up broadcast
-    inside the kernel must not be needed outside it.
+    The same two rules as ordinary merging, with one difference that matters.
+    The escape check has to be made against the union of all the targets, not
+    against each one separately: after duplication every consumer holds its
+    own copy, so a value read by two consumers has not escaped anything.
+    Checking one target at a time would refuse precisely the multi-consumer
+    case this pass exists for, and did.
+
+    The targets must stay pointwise. Inlining a producer into a reduction is a
+    different transform with its own legality, and it belongs to the reduction
+    pass.
     """
-    if target.kind != "pointwise" or producer.kind != "pointwise":
+    if producer.kind != "pointwise" or any(t.kind != "pointwise" for t in targets):
         return False
-    merged = target.nodes + [n for n in producer.nodes if n not in target.nodes]
-    space = _merged_space(merged)
-    if space is None:
-        return False
-    return _escape_ok(merged, space, uses, {id(n) for n in merged})
+    everyone = {id(n) for t in targets for n in t.nodes} | {id(n) for n in producer.nodes}
+    for target in targets:
+        merged = target.nodes + [n for n in producer.nodes if n not in target.nodes]
+        space = _merged_space(merged)
+        if space is None:
+            return False
+        if not _escape_ok(merged, space, uses, everyone):
+            return False
+    return True
 
 
 def _recompute_profitable(graph, groups, gi, consumer_groups, produced, cfg) -> bool:

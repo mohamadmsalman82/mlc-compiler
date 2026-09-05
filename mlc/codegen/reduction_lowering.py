@@ -33,7 +33,7 @@ from ..ir.scalar import Const, Expr, Load, Ref, call
 from ..ir.types import Layout
 from ..kernels import Bind, KernelArg, Reduce, ReductionKernel
 from ..passes.reduction_fusion import (ELEMENT, ROW, Frame, _group_frame, classify,
-                                       storable)
+                                       frame_axes, storable)
 from ..passes.scheduler import source_value
 
 
@@ -41,21 +41,38 @@ class ReductionLoweringError(Exception):
     pass
 
 
-def frame_layout(v: Value, target: tuple[int, ...], frame: Frame) -> Layout:
-    """Bring ``v`` into the frame's (row, col) dimension order.
+def frame_layout(v: Value, target: tuple[int, ...], frame: Frame) -> tuple[list, Layout]:
+    """Axes and layout to read ``v`` by, given the shape it broadcasts to.
 
-    ``target`` is the output shape of the node reading ``v``, which is what
-    ``v`` broadcasts to before the frame is applied.
+    ``target`` is the output shape of the node reading ``v``. Three cases:
+    the target lives in the element shape and is permuted into (row, col)
+    order; it lives in the row shape and gets the reduced axes appended with
+    stride 0; or it is a row-major reshape of one of those, in which case its
+    own leading dimensions become the row axis.
     """
     target = tuple(target)
-    element_ok = classify(target, frame) is not None and _broadcasts(target, frame.element)
-    if element_ok:
+    frame_split = [("row", frame.row), ("col", frame.col)]
+
+    if _broadcasts(target, frame.element):
+        # The ordinary case. Always indexed by the frame's own split, even
+        # when the target would also match the reshaped pattern: the layout is
+        # in element order here, and the two splits have to agree.
         lay = v.layout if tuple(v.shape) == frame.element else v.layout.expand(frame.element)
-        return lay.permute(frame.order)
-    # Row-shaped target: the reduced dimensions are gone entirely, so append
-    # them back with stride 0.
+        return frame_split, lay.permute(frame.order)
+
+    axes = frame_axes(target, frame)
+    row_shape = axes[0][1]
+    if row_shape != frame.row:
+        # Reshaped element shape: index it in its own frame, which covers the
+        # same elements in the same order.
+        lay = v.layout if tuple(v.shape) == target else v.layout.expand(target)
+        return axes, lay
+
+    # Row-shaped target: the reduced dimensions are gone, so append them back
+    # with stride 0 so the value is constant along the column axis.
     lay = v.layout if tuple(v.shape) == frame.row else v.layout.expand(frame.row)
-    return Layout(frame.row + frame.col, lay.strides + (0,) * len(frame.col), lay.offset)
+    return frame_split, Layout(frame.row + frame.col,
+                               lay.strides + (0,) * len(frame.col), lay.offset)
 
 
 def _broadcasts(shape, to) -> bool:
@@ -97,7 +114,8 @@ class _Builder:
         return Load(slot)
 
     def operand(self, v: Value, target: tuple[int, ...]) -> Expr:
-        imap = build_index(self.axes(), frame_layout(v, target, self.frame))
+        axes, lay = frame_layout(v, target, self.frame)
+        imap = build_index(axes, lay)
         src = source_value(v)
         live = self.env.get(id(src))
         if live is not None and live[1] == imap:
@@ -231,12 +249,8 @@ def build_reduction(graph: Graph, group, stores: set[int], name: str,
                 imap = build_index([("row", frame.row)], Layout.contiguous(frame.row))
                 row_outputs.add(o.name)
             else:
-                if tuple(o.shape) != frame.element:
-                    raise ReductionLoweringError(
-                        f"{o.name} has shape {list(o.shape)}, not the element shape "
-                        f"{list(frame.element)}; reduction kernels do not cross reshapes"
-                    )
-                imap = build_index(b.axes(), o.layout.permute(frame.order))
+                axes, lay = frame_layout(o, tuple(o.shape), frame)
+                imap = build_index(axes, lay)
             outputs.append(KernelArg(o, imap))
             out_expr[o.name] = b.env[id(o)][0]
 
@@ -259,17 +273,17 @@ def build_reduction(graph: Graph, group, stores: set[int], name: str,
 def _out_index(v: Value, frame: Frame, b: _Builder) -> IndexMap:
     """Index map a value produced inside the kernel is live at.
 
-    Used only to decide whether a later read can reuse the register instead of
-    loading, so it has to be built the same way an operand read would be.
+    Used to decide whether a later read can reuse the register instead of
+    loading, so it is built exactly the way an operand read would be.
     """
-    where = classify(v.shape, frame)
-    if where is ROW and tuple(v.shape) == frame.row:
+    axes, lay = frame_layout(v, tuple(v.shape), frame)
+    if classify(v.shape, frame) is ROW and not _broadcasts(v.shape, frame.element):
+        # keepdim=False result: constant along the column axis
+        base = v.layout if tuple(v.shape) == frame.row else v.layout.expand(frame.row)
         lay = Layout(frame.row + frame.col,
-                     v.layout.strides + (0,) * len(frame.col), v.layout.offset)
-    else:
-        lay = (v.layout if tuple(v.shape) == frame.element
-               else v.layout.expand(frame.element)).permute(frame.order)
-    return build_index(b.axes(), lay)
+                     base.strides + (0,) * len(frame.col), base.offset)
+        axes = [("row", frame.row), ("col", frame.col)]
+    return build_index(axes, lay)
 
 
 def _prune(inputs: list[KernelArg], steps: list, out_expr: dict[str, Expr]):
