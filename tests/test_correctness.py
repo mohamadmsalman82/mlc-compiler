@@ -23,6 +23,7 @@ CONFIGS = {
                           memory_planning=False, cuda_graphs=False),
     "elementwise_recompute": Config(reduction_fusion=False, memory_planning=False,
                                     cuda_graphs=False),
+    "planned": Config(reduction_fusion=False, cuda_graphs=False),
 }
 
 CASES = [(name, cfg_name) for name, _, _ in all_models() for cfg_name in CONFIGS]

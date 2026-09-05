@@ -169,8 +169,16 @@ class Layout:
         return None if strides is None else Layout(shape, strides, self.offset)
 
     def as_torch(self, storage: torch.Tensor) -> torch.Tensor:
-        """Materialise this layout as a view of a flat 1-D ``storage`` tensor."""
-        return storage.as_strided(self.shape, self.strides, self.offset)
+        """Materialise this layout as a view of a flat 1-D ``storage`` tensor.
+
+        ``as_strided`` takes an offset into the *storage*, not into the tensor
+        it is called on, so the tensor's own storage offset has to be added.
+        It is zero for a standalone allocation and non-zero for a slice of the
+        memory arena, which is exactly the case that would otherwise read the
+        wrong bytes with no error.
+        """
+        return storage.as_strided(self.shape, self.strides,
+                                  self.offset + storage.storage_offset())
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         tag = "" if self.is_contiguous() else f" strides={self.strides} off={self.offset}"

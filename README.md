@@ -99,6 +99,6 @@ pytest tests/          # runs anywhere
 
 - [x] graph capture, shape and dtype propagation
 - [x] elementwise fusion, recompute, Triton codegen, runtime
-- [ ] memory planning
+- [x] memory planning
 - [ ] reduction fusion
 - [ ] benchmarks against eager and `torch.compile`

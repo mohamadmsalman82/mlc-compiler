@@ -67,7 +67,8 @@ class CompiledModel:
         self._static_outputs: Any = None
 
     # -- allocation --------------------------------------------------------
-    def _allocate(self, inputs: Sequence[torch.Tensor]) -> dict[str, torch.Tensor]:
+    def _bind_resident(self, inputs: Sequence[torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Buffers that exist for the whole call: params, inputs, outputs."""
         buffers = dict(self.params)
         if len(inputs) != len(self.graph.inputs):
             raise ExecutionError(
@@ -79,47 +80,67 @@ class CompiledModel:
                     f"input {v.name}: compiled for {v.shape}, called with {tuple(t.shape)}"
                 )
             buffers[v.buffer.name] = t.to(self.device).contiguous().reshape(-1)
-
-        if self.schedule.arena_bytes and self.cfg.memory_planning:
-            arena = self._get_arena()
-            for b in self.graph.buffers():
-                if b.name in buffers:
-                    continue
-                if b.arena_offset is None:
-                    buffers[b.name] = torch.empty(b.numel, dtype=b.dtype, device=self.device)
-                else:
-                    start = b.arena_offset
-                    buffers[b.name] = arena[start : start + b.nbytes].view(b.dtype)
-        else:
-            for b in self.graph.buffers():
-                if b.name not in buffers:
-                    buffers[b.name] = torch.empty(b.numel, dtype=b.dtype, device=self.device)
+        for b in self.graph.buffers():
+            if b.name not in buffers and not b.plannable:
+                buffers[b.name] = torch.empty(b.numel, dtype=b.dtype, device=self.device)
         return buffers
 
+    def _bind_arena(self, buffers: dict[str, torch.Tensor]) -> None:
+        """Point every planned buffer at its slice of the one allocation."""
+        plan = self.schedule.plan
+        arena = self._get_arena()
+        for b in self.graph.buffers():
+            if b.name in buffers:
+                continue
+            offset = plan.offsets.get(b.name) if plan is not None else None
+            if offset is None:
+                buffers[b.name] = torch.empty(b.numel, dtype=b.dtype, device=self.device)
+            else:
+                buffers[b.name] = arena[offset : offset + b.nbytes].view(b.dtype)
+
     def _get_arena(self) -> torch.Tensor:
-        if self._arena is None or self._arena.numel() < self.schedule.arena_bytes:
-            self._arena = torch.empty(
-                self.schedule.arena_bytes, dtype=torch.uint8, device=self.device
-            )
+        need = max(self.schedule.arena_bytes, 1)
+        if self._arena is None or self._arena.numel() < need:
+            self._arena = torch.empty(need, dtype=torch.uint8, device=self.device)
         return self._arena
 
     # -- execution ---------------------------------------------------------
     def run_kernels(self, buffers: dict[str, torch.Tensor]) -> None:
         for k in self.schedule.kernels:
-            if isinstance(k, ExternKernel):
-                run_extern(k, buffers)
-            elif self._module is not None:
-                self._module.launch(k, buffers)
-            elif isinstance(k, PointwiseKernel):
-                torch_backend.run_pointwise(k, buffers)
-            elif isinstance(k, ReductionKernel):
-                torch_backend.run_reduction(k, buffers)
-            else:
-                raise ExecutionError(f"cannot execute {type(k).__name__}")
+            self.run_one(k, buffers)
+
+    def run_one(self, k, buffers: dict[str, torch.Tensor]) -> None:
+        if isinstance(k, ExternKernel):
+            run_extern(k, buffers)
+        elif self._module is not None:
+            self._module.launch(k, buffers)
+        elif isinstance(k, PointwiseKernel):
+            torch_backend.run_pointwise(k, buffers)
+        elif isinstance(k, ReductionKernel):
+            torch_backend.run_reduction(k, buffers)
+        else:
+            raise ExecutionError(f"cannot execute {type(k).__name__}")
+
+    def _run_eager(self, buffers: dict[str, torch.Tensor], plan) -> None:
+        """Allocate each intermediate when it is written, drop it when it is
+        last read. This is the honest unplanned baseline: it leans on torch's
+        caching allocator exactly the way a compiler without a planner would,
+        rather than reserving everything up front."""
+        for i, k in enumerate(self.schedule.kernels):
+            for b in plan.alloc_at.get(i, ()):
+                buffers[b.name] = torch.empty(b.numel, dtype=b.dtype, device=self.device)
+            self.run_one(k, buffers)
+            for name in plan.free_at.get(i, ()):
+                buffers.pop(name, None)
 
     def forward(self, *inputs: torch.Tensor):
-        buffers = self._allocate(inputs)
-        self.run_kernels(buffers)
+        buffers = self._bind_resident(inputs)
+        plan = self.schedule.plan
+        if plan is not None and plan.mode == "eager":
+            self._run_eager(buffers, plan)
+        else:
+            self._bind_arena(buffers)
+            self.run_kernels(buffers)
         return self._collect(buffers)
 
     def _collect(self, buffers: dict[str, torch.Tensor]):
@@ -158,25 +179,13 @@ class CompiledModel:
         return self._static_outputs
 
     def _capture(self, inputs) -> None:
-        static = [t.to(self.device).contiguous().reshape(-1).clone() for t in inputs]
-        buffers = dict(self.params)
-        for v, flat in zip(self.graph.inputs, static):
-            buffers[v.buffer.name] = flat
-        if self.schedule.arena_bytes and self.cfg.memory_planning:
-            arena = self._get_arena()
-            for b in self.graph.buffers():
-                if b.name in buffers:
-                    continue
-                if b.arena_offset is None:
-                    buffers[b.name] = torch.empty(b.numel, dtype=b.dtype, device=self.device)
-                else:
-                    buffers[b.name] = arena[b.arena_offset : b.arena_offset + b.nbytes].view(b.dtype)
-        else:
-            for b in self.graph.buffers():
-                if b.name not in buffers:
-                    buffers[b.name] = torch.empty(b.numel, dtype=b.dtype, device=self.device)
+        buffers = self._bind_resident(inputs)
+        static = [buffers[v.buffer.name] for v in self.graph.inputs]
+        # Capture needs every pointer fixed for the life of the graph, so the
+        # eager alloc/free plan is not usable here: bind everything up front.
+        self._bind_arena(buffers)
 
-        # Warm up on a side stream: kernels have to be compiled and cuBLAS
+        # Warm up on a side stream. Kernels have to be compiled and cuBLAS
         # workspaces allocated before capture, or capture records the
         # allocation instead of the work.
         side = torch.cuda.Stream()

@@ -189,6 +189,7 @@ class Schedule:
     kernels: list[Kernel] = field(default_factory=list)
     #: filled in by the memory planner
     arena_bytes: int = 0
+    plan: object | None = None
 
     def __iter__(self):
         return iter(self.kernels)
@@ -207,8 +208,8 @@ class Schedule:
         lines = [f"schedule({len(self.kernels)} kernels, {self.counts()})"]
         for k in self.kernels:
             lines.append("  " + k.summary())
-        if self.arena_bytes:
-            lines.append(f"  arena: {self.arena_bytes / 1024:.1f} KiB")
+        if self.plan is not None:
+            lines.append("  " + self.plan.summary())
         return "\n".join(lines)
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid

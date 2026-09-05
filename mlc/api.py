@@ -37,10 +37,12 @@ def build_pipeline(graph, cfg: Config) -> Schedule:
     """Run every pass, in order, over an already captured graph."""
     groups = plan(graph, cfg)
     schedule = build_schedule(graph, groups, cfg)
-    if cfg.memory_planning:
-        from .passes.memory_planning import plan_memory
+    # Always run the planner: with planning off it still computes live ranges
+    # and produces the alloc/free schedule the unplanned baseline runs on, so
+    # the two paths are comparable rather than one being a straw man.
+    from .passes.memory_planning import plan_memory
 
-        plan_memory(graph, schedule, cfg)
+    plan_memory(graph, schedule, cfg)
     return schedule
 
 
