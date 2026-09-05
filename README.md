@@ -121,6 +121,14 @@ python -m mlc run bert-base --device cuda
 python -m mlc.bench --calibrate --models gpt-small --batches 1
 ```
 
+On a consumer card fp32 is the weak path, so `--dtype float16` is the
+realistic configuration:
+
+```
+python -m mlc.bench --calibrate --dtype float16 \
+    --models bert-base gpt2-small --batches 1 8 32 --out results/bench.md
+```
+
 `run` compiles the model, executes it through the Triton backend, and checks
 the result against eager. It reports the backend actually used, so a silent
 fallback to the reference backend cannot be mistaken for a passing GPU run.
@@ -187,5 +195,6 @@ structure the GPU would.
 - [x] reduction fusion
 - [x] benchmark harness, per-pass attribution, `torch.compile` baselines
 - [x] fusion legality writeup
+- [x] fp16 support, with fp32 accumulation in reductions
 - [ ] latency and memory numbers (needs a CUDA device)
 - [ ] analysis of a case where `torch.compile` wins

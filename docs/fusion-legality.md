@@ -310,7 +310,11 @@ implementing.
 
 - **Fusing into or through a matmul.** Matmuls dispatch to cuBLAS and act as
   barriers. An epilogue fusion (bias and activation folded into the GEMM)
-  needs a GEMM of one's own, which is explicitly out of scope.
+  needs a GEMM of one's own, which is explicitly out of scope. `addmm` is
+  split into `mm` and a pointwise `add` so at least the bias reaches a fused
+  kernel; that split is done by the compiler rather than by a torch
+  decomposition table, because torch's wraps it in a cast-for-opmath that
+  would upcast every fp16 GEMM to fp32.
 - **Reshape-crossing inside reduction kernels**, for the reason in section 2.
 - **Fusing reductions over different axes of the same tensor.** They have
   different frames and cannot share an iteration space. Two reductions over

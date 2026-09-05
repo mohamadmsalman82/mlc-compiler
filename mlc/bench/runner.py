@@ -152,12 +152,15 @@ def _no_grad_call(model, args):
 
 def run_one(model_name: str, batch: int, seq: int, device: torch.device,
             variants: Sequence[str], iters: int = 100,
-            tolerance: float = 2e-3, base: Config | None = None) -> list[Result]:
+            tolerance: float = 2e-3, base: Config | None = None,
+            dtype: torch.dtype = torch.float32) -> list[Result]:
     from ..devices import profile_for
     from .models import build
 
     base = base if base is not None else profile_for(device).to_config()
-    model, args = build(model_name, batch, seq, device)
+    model, args = build(model_name, batch, seq, device, dtype)
+    if dtype == torch.float16:
+        tolerance = max(tolerance, 5e-2)
     with torch.no_grad():
         reference = model(*args)
 
@@ -190,11 +193,13 @@ def run_one(model_name: str, batch: int, seq: int, device: torch.device,
 
 def run_suite(models: Sequence[str], batches: Sequence[int], seq: int,
               device: torch.device, variants: Sequence[str] = tuple(VARIANT_PASSES),
-              iters: int = 100, base: Config | None = None) -> list[Result]:
+              iters: int = 100, base: Config | None = None,
+              dtype: torch.dtype = torch.float32) -> list[Result]:
     results: list[Result] = []
     for m in models:
         for b in batches:
-            results.extend(run_one(m, b, seq, device, variants, iters=iters, base=base))
+            results.extend(run_one(m, b, seq, device, variants, iters=iters,
+                                   base=base, dtype=dtype))
     return results
 
 

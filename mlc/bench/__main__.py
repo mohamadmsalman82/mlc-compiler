@@ -25,6 +25,8 @@ def main(argv=None) -> int:
     ap.add_argument("--calibrate", action="store_true",
                     help="measure the cost model constants on this device "
                          "instead of taking them from the spec table")
+    ap.add_argument("--dtype", default="float32", choices=["float32", "float16"],
+                    help="fp16 is the realistic configuration on a consumer card")
     ap.add_argument("--quick-calibrate", action="store_true",
                     help="same, with shorter measurements")
     ap.add_argument("--out", type=pathlib.Path, default=None,
@@ -48,11 +50,12 @@ def main(argv=None) -> int:
     base = profile.to_config()
 
     results = run_suite(args.models, args.batches, args.seq, device,
-                        args.variants, iters=args.iters, base=base)
+                        args.variants, iters=args.iters, base=base,
+                        dtype=getattr(torch, args.dtype))
     table = format_table(results)
     header = (f"# Benchmarks\n\ndevice: `{device}`"
               + (f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else "")
-              + f"\ntorch: `{torch.__version__}`\n\n"
+              + f"\ntorch: `{torch.__version__}`  dtype: `{args.dtype}`\n\n"
               + "cost model:\n```\n" + profile.summary() + "\n```\n")
     if profile.l2_bytes:
         header += _l2_note(results, profile)

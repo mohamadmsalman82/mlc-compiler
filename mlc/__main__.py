@@ -27,11 +27,12 @@ from .ir.printer import format_graph
 from .kernels import ReductionKernel
 
 
-def _load(name: str, batch: int, seq: int, device: str):
+def _load(name: str, batch: int, seq: int, device: str,
+          dtype: torch.dtype = torch.float32):
     from .bench.models import SUITE, build
 
     if name in SUITE:
-        return build(name, batch, seq, device)
+        return build(name, batch, seq, device, dtype)
     if ":" in name:
         import importlib
 
@@ -72,13 +73,17 @@ def main(argv=None) -> int:
     ap.add_argument("--no-recompute", action="store_true")
     ap.add_argument("--no-reduction", action="store_true")
     ap.add_argument("--no-memory", action="store_true")
+    ap.add_argument("--dtype", default="float32", choices=["float32", "float16"])
     ap.add_argument("--tol", type=float, default=2e-3,
                     help="run: max absolute difference from eager to accept")
     args = ap.parse_args(argv)
     if args.device is None:
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model, inputs = _load(args.model, args.batch, args.seq, args.device)
+    model, inputs = _load(args.model, args.batch, args.seq, args.device,
+                          getattr(torch, args.dtype))
+    if args.dtype == "float16":
+        args.tol = max(args.tol, 5e-2)
     graph = capture(model, inputs)
 
     if args.command == "passes":

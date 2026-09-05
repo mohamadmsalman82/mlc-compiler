@@ -23,6 +23,7 @@ from typing import Any, Callable, Sequence
 
 import torch
 
+from .graph import Value
 from .scalar import Cast, Const, Expr, call
 from .types import Layout
 
@@ -309,9 +310,29 @@ def _identity(args, exprs, kwargs):
     return exprs[0]
 
 
+#: Float types the backends keep in fp32 registers regardless of how they are
+#: stored, so a cast between them and fp32 is a no-op in the kernel body.
+_PROMOTED = (torch.float16, torch.bfloat16, torch.float32)
+
+
 def _convert(args, exprs, kwargs):
+    """Dtype conversion, dropped when it cannot change anything.
+
+    Both backends load narrow floats into fp32 and cast back on store, so a
+    cast to fp32 of a value that is already there is dead. Half-precision
+    graphs are full of these: layer norm decomposes into an fp32 computation
+    bracketed by conversions, and every one of them would otherwise reach the
+    generated kernel.
+    """
     dt = kwargs.get("dtype", args[1] if len(args) > 1 else None)
-    return Cast(exprs[0], dt) if dt is not None else exprs[0]
+    if dt is None:
+        return exprs[0]
+    src = args[0].dtype if isinstance(args[0], Value) else None
+    if src == dt:
+        return exprs[0]
+    if dt == torch.float32 and src in _PROMOTED:
+        return exprs[0]
+    return Cast(exprs[0], dt)
 
 
 for _n in ("aten._to_copy.default", "prims.convert_element_type.default", "aten.to.dtype"):

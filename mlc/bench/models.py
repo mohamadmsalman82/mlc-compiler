@@ -207,8 +207,18 @@ SUITE = {
 
 
 def build(name: str, batch: int, seq: int | None = None,
-          device: str | torch.device = "cpu"):
+          device: str | torch.device = "cpu", dtype: torch.dtype = torch.float32):
+    """Build a model and its inputs.
+
+    ``dtype`` halves the weights and float inputs. On a consumer card fp32 is
+    the weak path, so fp16 is the realistic configuration there; index tensors
+    stay integral either way.
+    """
     builder, inputs, default_seq = SUITE[name]
     torch.manual_seed(0)
     model = builder().eval().to(device)
-    return model, inputs(batch, seq or default_seq, device)
+    args = inputs(batch, seq or default_seq, device)
+    if dtype != torch.float32:
+        model = model.to(dtype)
+        args = tuple(a.to(dtype) if a.is_floating_point() else a for a in args)
+    return model, args

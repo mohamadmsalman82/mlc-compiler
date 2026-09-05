@@ -28,13 +28,19 @@ from .types import Buffer, Layout
 
 #: Ops we force apart even though they are "core ATen". Each one hides a
 #: reduction or a pointwise chain that the fusion passes want to see.
+#: ``addmm`` is deliberately absent below and split by hand instead. Torch's
+#: decomposition of it is wrapped in a cast-for-opmath, so in half precision
+#: it upcasts both operands to fp32, runs the matmul there, and casts back.
+#: That silently turns every fp16 GEMM into an fp32 one plus two conversion
+#: passes over the weights, which on a consumer card gives up the tensor
+#: cores entirely. Splitting it ourselves keeps the dtypes exactly as they
+#: were and still exposes the bias add to fusion.
 FORCE_DECOMPOSE = [
     "_softmax",
     "_log_softmax",
     "native_layer_norm",
     "gelu",
     "silu",
-    "addmm",
     "var_mean.correction",
     "std_mean.correction",
     "split_with_sizes",
@@ -182,6 +188,10 @@ def _call(g: Graph, fx_node, env) -> None:
         env[fx_node] = _expand_split(g, op, args, kwargs, fx_node)
         return
 
+    if op == "aten.addmm.default" and _plain_addmm(args, kwargs):
+        env[fx_node] = _split_addmm(g, args, kwargs, fx_node)
+        return
+
     if cls is OpClass.VIEW:
         env[fx_node] = _make_view(g, op, args, kwargs, fx_node)
         return
@@ -271,6 +281,42 @@ DROP_OPS = {
     "aten.sym_constrain_range_for_size.default",
     "aten._functional_assert_scalar.default",
 }
+
+
+def _plain_addmm(args, kwargs) -> bool:
+    """True for addmm with the default scalings, which is every one a Linear
+    produces. Anything else stays a single extern call."""
+    beta = kwargs.get("beta", args[3] if len(args) > 3 else 1)
+    alpha = kwargs.get("alpha", args[4] if len(args) > 4 else 1)
+    return beta == 1 and alpha == 1
+
+
+def _split_addmm(g: Graph, args, kwargs, fx_node) -> Value:
+    """``addmm(bias, a, b)`` -> ``mm(a, b)`` then ``add(., bias)``.
+
+    Done here rather than by a decomposition table so the dtypes are untouched
+    (see the note on FORCE_DECOMPOSE). The point of splitting at all is that
+    the bias add is pointwise and fuses into whatever follows it, which for a
+    transformer is the next layer norm or activation.
+    """
+    bias, mat1, mat2 = args[0], args[1], args[2]
+    shape, dtype = shapes.infer_matmul("aten.mm.default", [mat1, mat2], {})
+    nm = f"{fx_node.name}_mm"
+    mm_out = Value(nm, Buffer(nm, shape, dtype, "intermediate"), Layout.contiguous(shape))
+    mm = Node("aten.mm.default", (mat1, mat2), {}, outputs=[mm_out])
+    mm.meta["target"] = torch.ops.aten.mm.default
+    g.add_node(mm)
+
+    out_shape, out_dtype = shapes.infer_pointwise(
+        "aten.add.Tensor", [mm_out, bias], {}
+    )
+    out = Value(fx_node.name, Buffer(fx_node.name, out_shape, out_dtype, "intermediate"),
+                Layout.contiguous(out_shape))
+    add = Node("aten.add.Tensor", (mm_out, bias), {}, outputs=[out])
+    add.meta["export_val"] = _fake(fx_node)
+    add.meta["target"] = torch.ops.aten.add.Tensor
+    g.add_node(add)
+    return out
 
 
 _SPLIT_OPS = {
