@@ -6,6 +6,11 @@ project are claims about intermediate artefacts:
     python -m mlc graph  gpt-small          the graph IR after capture
     python -m mlc show   bert-base          the kernel schedule and memory plan
     python -m mlc source gpt-small --kernel k7   the generated Triton
+    python -m mlc run    bert-base --device cuda  compile, run, check vs eager
+
+``run`` is the first thing to try on a GPU: it compiles the model, executes
+it through whichever backend is available, and compares the result against
+eager. If the generated Triton has a problem, this is where it surfaces.
 """
 
 from __future__ import annotations
@@ -54,11 +59,12 @@ def _config(args) -> Config:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m mlc", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["graph", "show", "source", "passes"])
+    ap.add_argument("command", choices=["graph", "show", "source", "passes", "run"])
     ap.add_argument("model")
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--seq", type=int, default=128)
-    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--device", default=None,
+                    help="defaults to cuda when available, else cpu")
     ap.add_argument("--kernel", default=None, help="source: show only this kernel")
     ap.add_argument("--max-row", type=int, default=Config().max_persistent_row,
                     help="rows longer than this stream instead of staying resident")
@@ -66,7 +72,11 @@ def main(argv=None) -> int:
     ap.add_argument("--no-recompute", action="store_true")
     ap.add_argument("--no-reduction", action="store_true")
     ap.add_argument("--no-memory", action="store_true")
+    ap.add_argument("--tol", type=float, default=2e-3,
+                    help="run: max absolute difference from eager to accept")
     args = ap.parse_args(argv)
+    if args.device is None:
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     model, inputs = _load(args.model, args.batch, args.seq, args.device)
     graph = capture(model, inputs)
@@ -77,6 +87,9 @@ def main(argv=None) -> int:
     if args.command == "graph":
         print(format_graph(graph, show_buffers=True))
         return 0
+
+    if args.command == "run":
+        return _run(model, inputs, graph, args)
 
     cfg = _config(args)
     schedule = build_pipeline(graph, cfg)
@@ -109,6 +122,41 @@ def main(argv=None) -> int:
     else:
         print(src)
     return 0
+
+
+def _run(model, inputs, graph, args) -> int:
+    """Compile, execute, and check against eager."""
+    import time
+
+    from .runtime.executor import CompiledModel
+
+    cfg = _config(args).replace(cuda_graphs=torch.device(args.device).type == "cuda")
+    with torch.no_grad():
+        want = model(*inputs)
+
+    t0 = time.perf_counter()
+    compiled = CompiledModel(graph, build_pipeline(graph, cfg), cfg,
+                             torch.device(args.device))
+    compile_s = time.perf_counter() - t0
+
+    got = compiled(*inputs)
+    outs = got if isinstance(got, (list, tuple)) else [got]
+    wants = want if isinstance(want, (list, tuple)) else [want]
+    err = max((o.float() - w.float()).abs().max().item() for o, w in zip(outs, wants))
+
+    print(f"model      {args.model}  batch={args.batch} seq={args.seq}")
+    print(f"device     {compiled.device}   backend  {compiled.backend}")
+    print(f"kernels    {len(compiled.schedule)}  ({compiled.schedule.counts()})")
+    print(f"compiled   {compile_s:.2f}s")
+    print(f"memory     {compiled.schedule.plan.summary()}")
+    print(f"max error  {err:.3e} vs eager")
+    if compiled.backend != "triton":
+        print("\nnote: the Triton backend was not used. On CUDA that means "
+              "triton is not importable; anywhere else it is expected, and "
+              "the reference backend ran instead.")
+    ok = err <= args.tol
+    print("\nRESULT     " + ("ok" if ok else f"WRONG (tolerance {args.tol:.1e})"))
+    return 0 if ok else 1
 
 
 def _passes(model, inputs, graph) -> int:

@@ -76,3 +76,26 @@ def test_batch_size_changes_the_plan_but_not_the_answer(batch):
         want = model(*args)
     torch.testing.assert_close(mlc.compile(model, args, CFG)(*args), want,
                                rtol=2e-4, atol=2e-5)
+
+
+def test_cli_run_verifies_against_eager():
+    """The command the first GPU session will use. Exercised on CPU so a
+    regression in it does not wait for hardware to surface."""
+    from mlc.__main__ import main
+
+    assert main(["run", "gpt-small", "--batch", "1", "--seq", "16"]) == 0
+
+
+def test_cli_run_reports_failure_with_an_impossible_tolerance():
+    from mlc.__main__ import main
+
+    assert main(["run", "gpt-small", "--batch", "1", "--seq", "16",
+                 "--tol", "0"]) == 1
+
+
+def test_cli_views_all_work():
+    from mlc.__main__ import main
+
+    for cmd in (["graph", "gpt-small"], ["show", "gpt-small"],
+                ["passes", "gpt-small"], ["source", "gpt-small"]):
+        assert main(cmd + ["--batch", "1", "--seq", "16"]) == 0

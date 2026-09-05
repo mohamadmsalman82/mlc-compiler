@@ -112,6 +112,18 @@ def k6(in_ptr0, in_ptr1, out_ptr0, BLOCK_COL: tl.constexpr):
 Layer norm is the same shape, and picks up the residual add and the bias
 before it as producers and the affine transform after it as an epilogue.
 
+## First run on a GPU
+
+```
+pip install torch triton
+pytest tests/
+python -m mlc run bert-base --device cuda
+```
+
+`run` compiles the model, executes it through the Triton backend, and checks
+the result against eager. It reports the backend actually used, so a silent
+fallback to the reference backend cannot be mistaken for a passing GPU run.
+
 ## Benchmarks
 
 ```
