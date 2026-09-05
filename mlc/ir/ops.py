@@ -280,6 +280,25 @@ def _masked_fill(args, exprs, kwargs):
     return call("where", exprs[1], _S(args[2]) if not isinstance(exprs[2], Expr) else exprs[2], exprs[0])
 
 
+def _fill_rule(default: float):
+    """Constant fills. Pointwise with no data dependence: the tensor operand
+    supplies the shape only, and the unused load is pruned during lowering."""
+
+    def build(args, exprs, kwargs, _d=default):
+        fill = kwargs.get("fill_value")
+        if fill is None:
+            fill = next((a for a in args[1:] if isinstance(a, (int, float, bool))), None)
+        return _S(_d if fill is None else fill)
+
+    return build
+
+
+for _n, _d in (("aten.full_like.default", 0.0), ("aten.zeros_like.default", 0.0),
+               ("aten.ones_like.default", 1.0), ("aten.new_full.default", 0.0),
+               ("aten.new_zeros.default", 0.0), ("aten.new_ones.default", 1.0)):
+    _reg(OpSpec(_n, OpClass.POINTWISE, lower=_fill_rule(_d)))
+
+
 # Copies. A clone is a pointwise identity; when the source layout already
 # matches the destination the copy pass deletes it, and when it does not
 # (the usual case: contiguify after a permute) it becomes a real kernel that

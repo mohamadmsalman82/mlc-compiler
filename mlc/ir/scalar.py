@@ -116,7 +116,7 @@ FUNCTIONS: dict[str, FnSpec] = {
 }
 
 
-def call(fn: str, *args: Expr) -> Call:
+def call(fn: str, *args: Expr) -> Expr:
     spec = FUNCTIONS.get(fn)
     if spec is None:
         raise KeyError(f"unknown scalar function {fn!r}")
@@ -125,7 +125,58 @@ def call(fn: str, *args: Expr) -> Call:
     for a in args:
         if not isinstance(a, Expr):
             raise TypeError(f"{fn} arg is {type(a).__name__}, expected Expr")
-    return Call(fn, tuple(args))
+    return _fold(fn, args) or Call(fn, tuple(args))
+
+
+def _is(e: Expr, v) -> bool:
+    return isinstance(e, Const) and not isinstance(e.value, bool) and e.value == v
+
+
+def _fold(fn: str, args: tuple[Expr, ...]) -> Expr | None:
+    """Exact algebraic identities, applied as expressions are built.
+
+    Only the ones that hold for every float, including NaN and infinity: x*1,
+    x+0, x-0, x/1. Not x*0, which is NaN for NaN x. Small, but they matter --
+    decomposing addmm produces ``mm * 1 + bias * 1`` and every one of those
+    multiplies would otherwise reach the generated kernel.
+    """
+    if fn in ("mul", "div") and _is(args[1], 1):
+        return args[0]
+    if fn == "mul" and _is(args[0], 1):
+        return args[1]
+    if fn in ("add", "sub") and _is(args[1], 0):
+        return args[0]
+    if fn == "add" and _is(args[0], 0):
+        return args[1]
+    # constant folding, so a chain of scalar-only arithmetic collapses
+    if all(isinstance(a, Const) for a in args):
+        folded = _eval_const(fn, [a.value for a in args])
+        if folded is not None:
+            return Const(folded)
+    return None
+
+
+def _eval_const(fn: str, vals: list):
+    import math as _m
+
+    try:
+        if fn == "add":
+            return vals[0] + vals[1]
+        if fn == "sub":
+            return vals[0] - vals[1]
+        if fn == "mul":
+            return vals[0] * vals[1]
+        if fn == "div":
+            return vals[0] / vals[1]
+        if fn == "neg":
+            return -vals[0]
+        if fn == "sqrt":
+            return _m.sqrt(vals[0])
+        if fn == "exp":
+            return _m.exp(vals[0])
+    except (ZeroDivisionError, ValueError, OverflowError):
+        return None
+    return None
 
 
 def walk(e: Expr):

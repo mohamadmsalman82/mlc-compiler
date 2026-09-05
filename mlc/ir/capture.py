@@ -172,6 +172,8 @@ def _call(g: Graph, fx_node, env) -> None:
         return
 
     op = str(target)
+    if op in DROP_OPS:
+        return
     args = [_resolve(a, env) for a in fx_node.args]
     kwargs = {k: _resolve(v, env) for k, v in fx_node.kwargs.items()}
     cls = op_class(op)
@@ -255,6 +257,20 @@ def _make_opaque(g: Graph, op: str, args, kwargs, fx_node, target):
     node.outputs = outs
     g.add_node(node)
     return outs[0] if len(outs) == 1 else outs
+
+
+#: Nodes torch.export inserts to record assumptions it already checked at
+#: trace time. They produce no tensor and have no meaning at run time for a
+#: static-shape graph, so they are dropped rather than made opaque.
+DROP_OPS = {
+    "aten._assert_tensor_metadata.default",
+    "aten._assert_async.msg",
+    "aten._assert_async.default",
+    "aten._assert_scalar.default",
+    "aten.sym_constrain_range.default",
+    "aten.sym_constrain_range_for_size.default",
+    "aten._functional_assert_scalar.default",
+}
 
 
 _SPLIT_OPS = {

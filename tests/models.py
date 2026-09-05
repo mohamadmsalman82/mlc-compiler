@@ -89,6 +89,26 @@ class Block(nn.Module):
         return x + self.fc2(F.gelu(self.fc1(self.ln2(x))))
 
 
+class Masked(nn.Module):
+    """Comparisons, boolean masks and where: the paths dtype rules get wrong."""
+
+    def forward(self, x, mask):
+        keep = mask > 0.5
+        y = torch.where(keep, x, torch.full_like(x, -1e4))
+        return (y.clamp(min=-1.0, max=1.0) * (x < 0).to(x.dtype)).sum(-1)
+
+
+class ResidualChain(nn.Module):
+    """One producer feeding several consumers: the recompute decision."""
+
+    def forward(self, x):
+        shared = torch.tanh(x * 0.5)
+        a = shared + 1.0
+        b = shared * 2.0
+        c = shared - 3.0
+        return a * b + c
+
+
 def all_models():
     """(name, module, example_inputs) for every model the suite exercises."""
     torch.manual_seed(0)
@@ -101,4 +121,6 @@ def all_models():
         ("attention", Attention(), (torch.randn(2, 8, 32),)),
         ("block", Block(), (torch.randn(2, 8, 32),)),
         ("block_b8", Block(), (torch.randn(8, 16, 32),)),
+        ("masked", Masked(), (torch.randn(4, 8), torch.rand(4, 8))),
+        ("residual_chain", ResidualChain(), (torch.randn(6, 12),)),
     ]
