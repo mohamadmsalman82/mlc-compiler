@@ -68,7 +68,8 @@ load. Because the form is canonical it sees through reshapes: `[B*T, D]` and
 every reshape a transformer contains.
 
 **Fusion legality** is written up in full in
-[docs/fusion-legality.md](docs/fusion-legality.md): acyclicity, iteration
+[docs/fusion-legality.md](docs/fusion-legality.md), and the benchmark protocol
+in [docs/benchmarks.md](docs/benchmarks.md): acyclicity, iteration
 spaces, index maps, escape, associativity and numerical stability, and the
 cost model that decides profit. Each rule says what breaks without it and
 names the test that covers it.
@@ -158,11 +159,8 @@ pass's contribution. `torch.compile` appears twice, in its default mode and in
 comparison for the graph-captured variant. Every variant is checked against
 eager before it is timed.
 
-**Latency and memory numbers are not filled in yet: they need a CUDA device,
-and this was developed on a machine without one.** Everything upstream of the
-launch is tested here (see below), and the harness runs end to end on CPU, but
-CPU timings measure the reference backend rather than the generated kernels
-and are not reported as results.
+Results are in [results/RESULTS.md](results/RESULTS.md), and what they do and
+do not say is in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Scope
 
