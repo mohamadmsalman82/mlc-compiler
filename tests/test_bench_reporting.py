@@ -70,3 +70,42 @@ def test_json_round_trips():
     assert len(parsed) == len(rows)
     assert parsed[0]["dtype"] == "float16"
     assert {"model", "batch", "seq", "variant", "latency_ms", "peak_mb"} <= set(parsed[0])
+
+
+# -- extern binding must not execute ---------------------------------------
+
+def test_binding_an_extern_call_does_not_execute_it():
+    """Resolving the launch plan happens before any kernel has run, so every
+    intermediate buffer still holds uninitialised memory. A binder that tried
+    the call to see whether it worked ran an embedding lookup against garbage
+    indices and tripped a device-side assert."""
+    import torch
+
+    import mlc
+    from mlc.config import Config
+    from mlc.runtime.executor import CompiledModel, bind_extern
+    from mlc.ir.capture import capture
+    from mlc.api import build_pipeline
+    from mlc.kernels import ExternKernel
+
+    class M(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.emb = torch.nn.Embedding(16, 8)
+
+        def forward(self, ids):
+            return self.emb(ids % 16) * 2.0
+
+    args = (torch.zeros(4, dtype=torch.long),)
+    cfg = Config(cuda_graphs=False)
+    g = capture(M().eval(), args)
+    sched = build_pipeline(g, cfg)
+    c = CompiledModel(g, sched, cfg, torch.device("cpu"))
+    buffers = c._resident_buffers(args)
+    # Poison every intermediate so any execution during binding misbehaves.
+    for name, t in buffers.items():
+        if t.dtype == torch.long and name not in {v.buffer.name for v in g.inputs}:
+            t.fill_(10_000)
+    for k in sched.kernels:
+        if isinstance(k, ExternKernel):
+            bind_extern(k, buffers)  # must not raise, must not run the op

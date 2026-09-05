@@ -67,6 +67,12 @@ class CompiledModel:
         #: model, so rebuilding these views per call is pure overhead --
         #: 4 ms of it on BERT-base, several times the kernel time.
         self._resident: dict[str, torch.Tensor] | None = None
+        #: fully bound launch sequence: one entry per kernel, arguments
+        #: resolved. Static shapes mean every pointer is fixed after the
+        #: first call, so resolving them per call is pure interpreter
+        #: overhead, and at 200 kernels it dominates the actual work.
+        self._plan: list | None = None
+        self._static_inputs_flat: list[torch.Tensor] | None = None
         self._module = None
         if self.backend == "triton":
             from .triton_runtime import TritonRuntime
@@ -126,9 +132,10 @@ class CompiledModel:
     def _resident_buffers(self, inputs: Sequence[torch.Tensor]) -> dict[str, torch.Tensor]:
         """The bound buffer table, built once and reused.
 
-        Only the input entries change between calls, so everything else is
-        bound at first use and kept. This is the payoff of fixing shapes: the
-        whole allocation is decided before the first kernel runs.
+        Inputs are copied into fixed buffers rather than aliased, so every
+        pointer in the table is stable for the life of the model. That is what
+        lets the launch sequence be resolved once. The copy is a few kilobytes
+        of token ids; resolving 200 kernels' arguments per call was milliseconds.
         """
         self._check_inputs(inputs)
         if self._resident is None:
@@ -137,10 +144,15 @@ class CompiledModel:
                 if b.name in buffers or b.plannable or b.name not in self._live:
                     continue
                 buffers[b.name] = torch.empty(b.numel, dtype=b.dtype, device=self.device)
+            for v in self.graph.inputs:
+                buffers[v.buffer.name] = torch.empty(
+                    v.buffer.numel, dtype=v.dtype, device=self.device
+                )
             self._bind_arena(buffers)
             self._resident = buffers
-        for v, t in zip(self.graph.inputs, inputs):
-            self._resident[v.buffer.name] = t.to(self.device).contiguous().reshape(-1)
+            self._static_inputs_flat = [buffers[v.buffer.name] for v in self.graph.inputs]
+        for dst, t in zip(self._static_inputs_flat, inputs):
+            dst.copy_(t.reshape(-1), non_blocking=True)
         return self._resident
 
     def _get_arena(self) -> torch.Tensor:
@@ -150,9 +162,44 @@ class CompiledModel:
         return self._arena
 
     # -- execution ---------------------------------------------------------
-    def run_kernels(self, buffers: dict[str, torch.Tensor]) -> None:
+    def _build_plan(self, buffers: dict[str, torch.Tensor]) -> list:
+        """Resolve every kernel's arguments once.
+
+        With the buffer table fixed, a launch is a function and a tuple. What
+        remains per call is the launch itself, which is the thing CUDA graph
+        capture then removes as well.
+        """
+        plan: list = []
         for k in self.schedule.kernels:
-            self.run_one(k, buffers)
+            if isinstance(k, ExternKernel):
+                plan.append(("extern", bind_extern(k, buffers)))
+            elif self._module is not None:
+                plan.append(("triton", self._module.bind(k, buffers)))
+            elif isinstance(k, PointwiseKernel):
+                plan.append(("pointwise", (k, buffers)))
+            elif isinstance(k, ReductionKernel):
+                plan.append(("reduction", (k, buffers)))
+            else:
+                raise ExecutionError(f"cannot execute {type(k).__name__}")
+        return plan
+
+    def run_kernels(self, buffers: dict[str, torch.Tensor]) -> None:
+        if self._plan is None or buffers is not self._resident:
+            # The unplanned baseline rebinds every call, so it cannot use a
+            # resolved plan; it runs the general path.
+            for k in self.schedule.kernels:
+                self.run_one(k, buffers)
+            return
+        for kind, payload in self._plan:
+            if kind == "triton":
+                fn, grid, args, consts = payload
+                fn[grid](*args, **consts)
+            elif kind == "extern":
+                run_bound_extern(payload)
+            elif kind == "pointwise":
+                torch_backend.run_pointwise(*payload)
+            else:
+                torch_backend.run_reduction(*payload)
 
     def run_one(self, k, buffers: dict[str, torch.Tensor]) -> None:
         if isinstance(k, ExternKernel):
@@ -189,6 +236,8 @@ class CompiledModel:
             self._run_eager(buffers, plan)
             return self._collect(buffers)
         buffers = self._resident_buffers(inputs)
+        if self._plan is None:
+            self._plan = self._build_plan(buffers)
         self.run_kernels(buffers)
         return self._collect(buffers)
 
@@ -223,12 +272,14 @@ class CompiledModel:
             self._capture(inputs)
         assert self._static_inputs is not None
         for dst, src in zip(self._static_inputs, inputs):
-            dst.copy_(src.to(self.device, non_blocking=True).contiguous().reshape(-1))
+            dst.copy_(src.reshape(-1), non_blocking=True)
         self._graph_replay.replay()
         return self._static_outputs
 
     def _capture(self, inputs) -> None:
         buffers = self._resident_buffers(inputs)
+        if self._plan is None:
+            self._plan = self._build_plan(buffers)
         static = [buffers[v.buffer.name] for v in self.graph.inputs]
 
         # Warm up on a side stream. Kernels have to be compiled and cuBLAS
@@ -263,23 +314,76 @@ class CompiledModel:
                 f"backend={self.backend}, device={self.device})")
 
 
-def out_variant(node) -> object | None:
-    """The ``.out`` overload of this op, if it has one.
+def bind_extern(k: ExternKernel, buffers: dict[str, torch.Tensor]):
+    """Resolve an extern call's operands against the fixed buffer table."""
+    node = k.node
+    target = node.meta.get("target")
+    if target is None:
+        raise ExecutionError(f"{node.op} has no dispatch target")
 
-    Without it every extern call writes to a tensor torch allocated and then
-    gets copied into ours, which on BERT-base is a hundred extra full-tensor
+    def materialise(a):
+        if isinstance(a, Value):
+            return a.layout.as_torch(buffers[a.buffer.name])
+        if isinstance(a, (list, tuple)):
+            return type(a)(materialise(x) for x in a)
+        return a
+
+    args = [materialise(a) for a in node.args]
+    kwargs = {k2: materialise(v) for k2, v in node.kwargs.items()}
+    variant = out_variant(node)
+    dest = None
+    if variant is not None:
+        out = node.outputs[0]
+        dest = out.layout.as_torch(buffers[out.buffer.name])
+    outs = [buffers[o.buffer.name] for o in node.outputs]
+    return [target, variant, args, kwargs, dest, outs]
+
+
+def run_bound_extern(bound) -> None:
+    target, variant, args, kwargs, dest, outs = bound
+    if variant is not None:
+        variant(*args, **kwargs, out=dest)
+        return
+    result = target(*args, **kwargs)
+    results = result if isinstance(result, (list, tuple)) else [result]
+    for buf, r in zip(outs, results):
+        buf.copy_(r.contiguous().reshape(-1))
+
+
+def out_variant(node) -> object | None:
+    """The ``.out`` overload of this op, if one takes the same arguments.
+
+    Without it every extern call writes to a tensor torch allocated and is
+    then copied into ours, which on BERT-base is a hundred extra full-tensor
     copies per forward. With it, cuBLAS writes into the arena directly.
+
+    Applicability is decided from the schema, never by trying the call. An
+    earlier version tested it by executing the op while resolving the launch
+    plan, which ran an embedding lookup against an index buffer no kernel had
+    filled yet and tripped a device-side assert.
     """
     if "out_variant" in node.meta:
         return node.meta["out_variant"]
     found = None
-    if node.op.startswith("aten.") and len(node.outputs) == 1:
-        parts = node.op.split(".")
-        packet = getattr(torch.ops.aten, parts[1], None)
-        if packet is not None and hasattr(packet, "out"):
-            found = packet.out
+    target = node.meta.get("target")
+    if (node.op.startswith("aten.") and len(node.outputs) == 1
+            and target is not None and hasattr(target, "_schema")):
+        packet = getattr(torch.ops.aten, node.op.split(".")[1], None)
+        overload = getattr(packet, "out", None) if packet is not None else None
+        if overload is not None and _same_arguments(target, overload):
+            found = overload
     node.meta["out_variant"] = found
     return found
+
+
+def _same_arguments(default, out_overload) -> bool:
+    """True when the out overload takes the default's arguments plus ``out``."""
+    try:
+        want = [a.name for a in default._schema.arguments]
+        have = [a.name for a in out_overload._schema.arguments]
+    except AttributeError:
+        return False
+    return have[: len(want)] == want and have[len(want):] == ["out"]
 
 
 def run_extern(k: ExternKernel, buffers: dict[str, torch.Tensor]) -> None:

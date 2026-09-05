@@ -64,6 +64,24 @@ class TritonRuntime:
         self.module = load_module(self.path)
         self.launch_table = self.module.LAUNCH
 
+    def bind(self, k: Kernel, buffers: dict[str, torch.Tensor]):
+        """Resolve a launch to (function, grid, argument tuple, constants).
+
+        Everything here is fixed once shapes are: the pointers come from the
+        resident buffer table and the grid and block sizes were baked into the
+        generated source.
+        """
+        if isinstance(k, ExternKernel):
+            raise TypeError("extern kernels do not go through the Triton runtime")
+        fn = getattr(self.module, k.name)
+        spec = self.launch_table[k.name]
+        ptrs = [buffers[a.value.buffer.name] for a in k.inputs]
+        ptrs += [buffers[a.value.buffer.name] for a in k.outputs]
+        consts = dict(spec["constants"])
+        consts["num_warps"] = spec["num_warps"]
+        consts["num_stages"] = spec["num_stages"]
+        return fn, spec["grid"], tuple(ptrs), consts
+
     def launch(self, k: Kernel, buffers: dict[str, torch.Tensor]) -> None:
         if isinstance(k, ExternKernel):
             raise TypeError("extern kernels do not go through the Triton runtime")
