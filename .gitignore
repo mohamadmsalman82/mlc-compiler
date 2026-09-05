@@ -6,5 +6,6 @@ venv/
 .pytest_cache/
 .DS_Store
 out/
-results/*.json
+results/*
+!results/README.md
 *.ncu-rep

@@ -26,8 +26,8 @@ from ..config import Config
 from ..ir.scalar import Expr, loads as expr_loads
 from ..kernels import Bind, Reduce, ReductionKernel
 from .reduction_schedule import plan_passes, scalar_binds, varies_by_column
-from .triton_backend import (LaunchSpec, _load_suffix, _store_cast, next_pow2,
-                             render_expr)
+from .triton_backend import (LaunchSpec, _load_suffix, next_pow2, render_expr,
+                             store_value)
 
 #: Identity of each reduction, used to neutralise masked lanes.
 IDENTITY = {
@@ -125,7 +125,7 @@ def _emit_stores(k, names, indent, masked, only=None):
             expr = arg.index.render()
             guard = ", mask=cmask" if masked else ""
         lines.append(f"{indent}tl.store(out_ptr{i} + ({expr}), "
-                     f"{value}{_store_cast(arg.dtype)}{guard})  # {nm}")
+                     f"{store_value(value, arg.dtype)}{guard})  # {nm}")
     return lines
 
 

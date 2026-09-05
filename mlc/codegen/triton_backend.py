@@ -181,8 +181,16 @@ def _load_suffix(dtype: torch.dtype) -> str:
     return ".to(tl.float32)" if dtype in NARROW else ""
 
 
-def _store_cast(dtype: torch.dtype) -> str:
-    return "" if dtype == torch.float32 else f".to({TL_DTYPE[dtype]})"
+def store_value(src: str, dtype: torch.dtype) -> str:
+    """Render a stored value, casting to the buffer dtype if needed.
+
+    Parenthesised unconditionally: a bare integer literal followed by ``.to``
+    is a syntax error in Python, and a constant store is exactly how a
+    ``zeros_like`` feeding an embedding lookup comes out.
+    """
+    if dtype == torch.float32:
+        return src
+    return f"({src}).to({TL_DTYPE[dtype]})"
 
 
 # --------------------------------------------------------------------------
@@ -230,8 +238,8 @@ def emit_pointwise(k: PointwiseKernel, cfg: Config) -> tuple[str, LaunchSpec]:
         src = render_expr(k.out_expr[arg.value.name], load_names)
         expr = arg.index.render()
         lines.append(
-            f"    tl.store(out_ptr{i} + ({expr}), {src}{_store_cast(arg.dtype)}{store_guard})"
-            f"  # {arg.value.name}"
+            f"    tl.store(out_ptr{i} + ({expr}), "
+            f"{store_value(src, arg.dtype)}{store_guard})  # {arg.value.name}"
         )
 
     spec = LaunchSpec(grid=grid, constants={"BLOCK": block}, num_warps=warps_for(block))

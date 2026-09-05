@@ -67,11 +67,69 @@ load. Because the form is canonical it sees through reshapes: `[B*T, D]` and
 `[B, T, D]` views of a contiguous buffer compare equal, so fusion crosses
 every reshape a transformer contains.
 
-**Fusion legality** is documented alongside the code in
-`mlc/passes/fusion.py` and `mlc/passes/reduction_fusion.py`, and the cost
-model it appeals to is in `mlc/passes/cost.py`. The model is denominated in
-HBM bytes, with arithmetic and kernel-launch overhead converted into that
-currency at device-specific rates.
+**Fusion legality** is written up in full in
+[docs/fusion-legality.md](docs/fusion-legality.md): acyclicity, iteration
+spaces, index maps, escape, associativity and numerical stability, and the
+cost model that decides profit. Each rule says what breaks without it and
+names the test that covers it.
+
+## What it compiles to
+
+`python -m mlc passes bert-base --batch 1 --seq 128`:
+
+| pass enabled | kernels | pointwise | reduction | extern | intermediates |
+|---|---:|---:|---:|---:|---:|
+| no passes | 730 | 556 | 0 | 174 | 331 MiB |
+| elementwise | 323 | 149 | 0 | 174 | 140 MiB |
+| + reduction | 200 | 63 | 37 | 100 | 112 MiB |
+| + memory planning | 200 | 63 | 37 | 100 | **3.4 MiB** |
+
+1229 graph nodes become 200 kernels, 100 of which are the matmuls and
+embeddings that dispatch to cuBLAS. GPT-2 small is 1111 nodes to 148 kernels.
+
+Softmax compiles to one kernel -- the scale, the mask, both reductions and the
+divide -- with the causal mask folded into the index arithmetic:
+
+```python
+@triton.jit
+def k6(in_ptr0, in_ptr1, out_ptr0, BLOCK_COL: tl.constexpr):
+    # persistent: 512 rows of 64, row space [1, 8, 64], reduced [64]
+    row = tl.program_id(0)
+    col = tl.arange(0, BLOCK_COL)
+    # 64 is exactly BLOCK_COL: no column mask needed
+    v0 = tl.load(in_ptr0 + ((row * 64 + col)))              # scores
+    v1 = tl.load(in_ptr1 + (((row % 64) * 256 + col)))      # causal mask
+    t0 = (v0 / 8.0)
+    t1 = (t0 + v1)
+    r2 = tl.max(t1, axis=0)
+    t3 = (t1 - r2)
+    t4 = tl.exp(t3)
+    r5 = tl.sum(t4, axis=0)
+    t6 = (t4 / r5)
+    tl.store(out_ptr0 + ((row * 64 + col)), t6)             # probs
+```
+
+Layer norm is the same shape, and picks up the residual add and the bias
+before it as producers and the affine transform after it as an epilogue.
+
+## Benchmarks
+
+```
+python -m mlc.bench --models bert-base gpt2-small --batches 1 8 32 --out results/bench.md
+```
+
+Variants run as a ladder -- no passes, elementwise, `+ reduction`,
+`+ memory`, `+ cuda-graphs` -- so the difference between adjacent rows is one
+pass's contribution. `torch.compile` appears twice, in its default mode and in
+`reduce-overhead`, because the second uses CUDA graphs and is the honest
+comparison for the graph-captured variant. Every variant is checked against
+eager before it is timed.
+
+**Latency and memory numbers are not filled in yet: they need a CUDA device,
+and this was developed on a machine without one.** Everything upstream of the
+launch is tested here (see below), and the harness runs end to end on CPU, but
+CPU timings measure the reference backend rather than the generated kernels
+and are not reported as results.
 
 ## Scope
 
@@ -92,8 +150,13 @@ only the Triton mechanics -- masking, block sizes, program ids -- need real
 hardware.
 
 ```
-pytest tests/          # runs anywhere
+pytest tests/          # 472 tests, runs anywhere
 ```
+
+The streamed reduction path, including its online-softmax recurrence, is
+covered by lowering `max_persistent_row` so that even a 32-element row does
+not fit. Both backends share the pass partition, so that runs the same program
+structure the GPU would.
 
 ## Status
 
@@ -101,4 +164,7 @@ pytest tests/          # runs anywhere
 - [x] elementwise fusion, recompute, Triton codegen, runtime
 - [x] memory planning
 - [x] reduction fusion
-- [ ] benchmarks against eager and `torch.compile`
+- [x] benchmark harness, per-pass attribution, `torch.compile` baselines
+- [x] fusion legality writeup
+- [ ] latency and memory numbers (needs a CUDA device)
+- [ ] analysis of a case where `torch.compile` wins
