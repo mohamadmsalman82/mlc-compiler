@@ -117,7 +117,8 @@ def _emit_stores(k, names, indent, masked, only=None):
         nm = arg.value.name
         if only is not None and nm not in only:
             continue
-        value = render_expr(k.out_expr[nm], names)
+        expr_ir = k.out_expr[nm]
+        value = render_expr(expr_ir, names)
         if nm in k.row_outputs:
             expr = arg.index.render_without("col")
             guard = ""
@@ -125,7 +126,8 @@ def _emit_stores(k, names, indent, masked, only=None):
             expr = arg.index.render()
             guard = ", mask=cmask" if masked else ""
         lines.append(f"{indent}tl.store(out_ptr{i} + ({expr}), "
-                     f"{store_value(value, arg.dtype)}{guard})  # {nm}")
+                     f"{store_value(expr_ir, value, arg.dtype, 'BLOCK_COL')}{guard})"
+                     f"  # {nm}")
     return lines
 
 

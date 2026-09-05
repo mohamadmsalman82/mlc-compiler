@@ -236,3 +236,87 @@ def test_recompute_decision_follows_the_device():
     _, stingy = _schedule(model, args, cheap_flops)
     _, generous = _schedule(model, args, rich_flops)
     assert len(generous) < len(stingy)
+
+
+# -- reads inside a kernel must be register-local ---------------------------
+
+class _TransposedReadback(nn.Module):
+    """A bias add over [B*T, D] whose result is then read through a transposed
+    view. Both shapes have the same element count, so the shape rules accept
+    them into one kernel, but iteration i would need the value iteration
+    perm(i) holds. This is the pattern that made BERT produce NaN at every
+    batch size above one."""
+
+    def __init__(self, d=24, h=3):
+        super().__init__()
+        self.h, self.d = h, d
+        self.fc = nn.Linear(d, d)
+
+    def forward(self, x):
+        b, t, _ = x.shape
+        y = self.fc(x)
+        y = y.view(b, t, self.h, self.d // self.h).transpose(1, 2)
+        return y.contiguous().view(b * self.h, t, self.d // self.h) * 2.0
+
+
+@pytest.mark.parametrize("batch", [1, 2, 4])
+def test_transposed_readback_is_not_fused(batch):
+    torch.manual_seed(0)
+    model = _TransposedReadback().eval()
+    args = (torch.randn(batch, 6, 24),)
+    with torch.no_grad():
+        want = model(*args)
+    got = mlc.compile(model, args, FULL)(*args)
+    torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-6)
+
+
+def test_reads_are_local_rejects_a_transposed_readback():
+    """The legality predicate itself, not just its effect."""
+    from mlc.lower import reads_are_local
+    from mlc.passes.fusion import _merged_space
+
+    g = capture(_TransposedReadback(), (torch.randn(2, 6, 24),))
+    pointwise = [n for n in g.nodes if op_class(n.op) is OpClass.POINTWISE]
+    space = _merged_space(pointwise)
+    if space is not None:
+        assert not reads_are_local(pointwise, space), (
+            "fusing every pointwise node here would need a cross-thread read"
+        )
+
+
+@pytest.mark.parametrize("name,batch", [("gpt-small", 1), ("gpt-small", 2),
+                                        ("bert-small", 1), ("bert-small", 2)])
+def test_bench_model_schedules_are_executable_in_order(name, batch):
+    """The invariant that catches a value read before anything wrote it.
+
+    It was already here, but only over the toy models, and the toy models do
+    not produce a transposed readback. Running it over the benchmark models at
+    batch 2 is what would have caught the miscompile.
+    """
+    from mlc.api import build_pipeline
+    from mlc.bench.models import build
+
+    model, args = build(name, batch, 32)
+    g = capture(model, args)
+    sched = build_pipeline(g, FULL)
+    written = {v.buffer.name for v in g.params} | {v.buffer.name for v in g.inputs}
+    for k in sched.kernels:
+        for v in k.reads():
+            assert v.buffer.name in written, (
+                f"{name} b{batch}: {k.name} reads {v.buffer.name} before it is written\n"
+                f"  {k.summary()}"
+            )
+        for v in k.writes():
+            written.add(v.buffer.name)
+
+
+@pytest.mark.parametrize("name,batch", [("gpt-small", 2), ("bert-small", 2)])
+def test_bench_models_match_eager_above_batch_one(name, batch):
+    from mlc.bench.models import build
+
+    torch.manual_seed(0)
+    model, args = build(name, batch, 32)
+    with torch.no_grad():
+        want = model(*args)
+    torch.testing.assert_close(mlc.compile(model, args, FULL)(*args), want,
+                               rtol=2e-4, atol=2e-5)

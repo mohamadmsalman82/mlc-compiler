@@ -208,6 +208,10 @@ class CompiledModel:
             return "# torch reference backend: no generated source"
         return self._module.source
 
+    def source_path(self):
+        """Where the generated Triton was written, or None."""
+        return None if self._module is None else self._module.path
+
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (f"CompiledModel({self.graph.name}, {len(self.schedule)} kernels, "
                 f"backend={self.backend}, device={self.device})")

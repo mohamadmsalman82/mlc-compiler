@@ -151,9 +151,19 @@ def fuse_elementwise(graph: Graph, gg: GroupGraph, cfg: Config, uses: UseInfo) -
             member_ids = {id(n) for n in merged}
             if not _escape_ok(merged, space, uses, member_ids):
                 continue
+            if not _reads_are_local(merged, space):
+                continue
             if not _worth_merging(gg, gi, gj, space, uses, member_ids, cfg):
                 continue
             gi = gg.merge(gi, gj)
+
+
+def _reads_are_local(nodes, space) -> bool:
+    """Refuse a merge where one member would read another's result at a
+    different index. See :func:`mlc.lower.reads_are_local`."""
+    from ..lower import reads_are_local
+
+    return reads_are_local(nodes, space)
 
 
 def _worth_merging(gg, gi, gj, space, uses, member_ids, cfg: Config) -> bool:
@@ -278,6 +288,8 @@ def _recompute_legal(producer: KernelGroup, targets: list[KernelGroup],
             return False
         if not _escape_ok(merged, space, uses, everyone):
             return False
+        if not _reads_are_local(merged, space):
+            return False
     return True
 
 
@@ -355,8 +367,15 @@ def _validate(groups: list[KernelGroup]) -> None:
     for g in groups:
         if g.kind != "pointwise":
             continue
-        if _merged_space(g.nodes) is None:
+        space = _merged_space(g.nodes)
+        if space is None:
             raise AssertionError(
                 "fusion produced an incoherent group: "
+                + ", ".join(f"{n.op}{list(n.out.shape)}" for n in g.nodes)
+            )
+        if not _reads_are_local(g.nodes, space):
+            raise AssertionError(
+                "fusion produced a group where one member reads another at a "
+                "different index, which no pointwise kernel can express: "
                 + ", ".join(f"{n.op}{list(n.out.shape)}" for n in g.nodes)
             )

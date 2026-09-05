@@ -24,7 +24,7 @@ from typing import Any, Callable, Sequence
 import torch
 
 from .graph import Value
-from .scalar import Cast, Const, Expr, call
+from .scalar import Cast, Const, Expr, call, cast
 from .types import Layout
 
 
@@ -332,7 +332,7 @@ def _convert(args, exprs, kwargs):
         return exprs[0]
     if dt == torch.float32 and src in _PROMOTED:
         return exprs[0]
-    return Cast(exprs[0], dt)
+    return cast(exprs[0], dt)
 
 
 for _n in ("aten._to_copy.default", "prims.convert_element_type.default", "aten.to.dtype"):

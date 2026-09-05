@@ -63,6 +63,18 @@ class Cast(Expr):
     dtype: torch.dtype
 
 
+def cast(x: Expr, dtype: torch.dtype) -> Expr:
+    """Cast, folded when the operand is a literal.
+
+    A backend cannot always emit a conversion on a bare constant: in Triton a
+    python literal is a ``constexpr``, which has no ``.to``. Folding the dtype
+    into the constant avoids ever generating one.
+    """
+    if isinstance(x, Const):
+        return Const(x.value, dtype)
+    return Cast(x, dtype)
+
+
 # --------------------------------------------------------------------------
 # Function table
 # --------------------------------------------------------------------------
