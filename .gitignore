@@ -8,4 +8,7 @@ venv/
 out/
 results/*
 !results/README.md
+!results/RESULTS.md
+!results/*.json
+!results/inductor-comparison.md
 *.ncu-rep

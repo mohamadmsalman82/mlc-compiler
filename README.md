@@ -138,6 +138,35 @@ python -m mlc.bench --calibrate --dtype float16 \
 the result against eager. It reports the backend actually used, so a silent
 fallback to the reference backend cannot be mistaken for a passing GPU run.
 
+## Results
+
+On an A40, fp16, sequence 128. Full tables in
+[results/RESULTS.md](results/RESULTS.md).
+
+| model | batch | eager | torch.compile | mlc | vs eager | vs torch.compile |
+|---|---:|---:|---:|---:|---:|---:|
+| bert-base | 1 | 5.91 | 3.30 | **1.08** | 5.48x | **3.05x** |
+| bert-base | 8 | 5.10 | 3.44 | 3.74 | 1.37x | 0.92x |
+| bert-base | 32 | 16.00 | 11.74 | 13.83 | 1.16x | 0.85x |
+| gpt2-small | 1 | 5.40 | 2.49 | **1.14** | 4.73x | **2.19x** |
+| gpt2-small | 8 | 8.16 | 4.74 | 5.34 | 1.53x | 0.89x |
+| gpt2-small | 32 | 21.52 | 14.33 | 20.30 | 1.06x | 0.71x |
+
+Specializing pays at batch size 1 and stops paying by batch 8. Eager itself
+is *faster* at batch 8 than at batch 1, which is what being launch-bound looks
+like, and that is the regime this design targets.
+
+Peak memory goes the other way and improves with batch size, because it does
+not depend on launch overhead: 292 MB against `torch.compile`'s 346 for BERT
+at batch 32, and 1194 MB against 1593 for GPT-2, a 25% reduction.
+
+[docs/where-torch-compile-wins.md](docs/where-torch-compile-wins.md) is the
+analysis of the crossover. Short version: at batch 32 the matmuls are 63% of
+the runtime and identical in both compilers, and half the remaining gap is 48
+copy kernels that exist only because we always allocate outputs contiguous
+while Inductor chooses layouts. It is not block-size tuning: a 16x range of
+block sizes moves the total by 1.3%.
+
 ## Benchmarks
 
 ```
@@ -198,5 +227,5 @@ structure the GPU would.
 - [x] benchmark harness, per-pass attribution, `torch.compile` baselines
 - [x] fusion legality writeup
 - [x] fp16 support, with fp32 accumulation in reductions
-- [ ] latency and memory numbers (needs a CUDA device)
-- [ ] analysis of a case where `torch.compile` wins
+- [x] latency and memory numbers, on an A40
+- [x] analysis of where `torch.compile` wins

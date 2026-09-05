@@ -59,7 +59,10 @@ def inductor_stats(source: str) -> dict:
     triton_red_ and triton_per_ are reductions (looped and persistent), and
     extern_kernels.* are the calls it hands to cuBLAS.
     """
-    kernels = re.findall(r"def (triton_\w+?)_fused", source)
+    # Inductor does not write `def triton_poi_...`: it binds the name to an
+    # async_compile.triton(...) call whose body defines a function called
+    # `triton_`. Match the binding name wherever it appears and dedupe.
+    kernels = sorted(set(re.findall(r"\btriton_(?:poi|red|per)_fused_\w+", source)))
     kinds = collections.Counter(k.split("_")[1] for k in kernels)
     return {
         "pointwise": kinds.get("poi", 0),
