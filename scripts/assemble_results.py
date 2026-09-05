@@ -84,16 +84,18 @@ def main() -> int:
         best_tc = min(tc, key=lambda r: r["latency_ms"]) if tc else None
         if not base or not best:
             continue
-        out.append(
-            f"| {model} | {dtype} | {batch} | {fmt(base['latency_ms'])} "
-            f"| {fmt(by.get('torch.compile', {}).get('latency_ms'))} "
-            f"| {fmt(by.get('torch.compile/reduce-overhead', {}).get('latency_ms'))} "
-            f"| {fmt(best['latency_ms'])} "
-            f"| {base['latency_ms'] / best['latency_ms']:.2f}x "
-            f"| {(best_tc['latency_ms'] / best['latency_ms']):.2f}x " if best_tc else "| |"
-        )
-        out[-1] += (f"| {fmt(best.get('peak_mb'), 1)} "
-                    f"| {fmt(best_tc.get('peak_mb'), 1) if best_tc else ''} |")
+        cells = [
+            model, dtype, str(batch),
+            fmt(base["latency_ms"]),
+            fmt(by.get("torch.compile", {}).get("latency_ms")),
+            fmt(by.get("torch.compile/reduce-overhead", {}).get("latency_ms")),
+            fmt(best["latency_ms"]),
+            f"{base['latency_ms'] / best['latency_ms']:.2f}x",
+            f"{best_tc['latency_ms'] / best['latency_ms']:.2f}x" if best_tc else "",
+            fmt(best.get("peak_mb"), 1),
+            fmt(best_tc.get("peak_mb"), 1) if best_tc else "",
+        ]
+        out.append("| " + " | ".join(cells) + " |")
 
     # -- per configuration -------------------------------------------------
     out += ["", "## Every variant", ""]
