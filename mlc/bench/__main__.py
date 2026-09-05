@@ -40,6 +40,11 @@ def main(argv=None) -> int:
               "falls back to its reference backend.\n", file=sys.stderr)
 
     profile = profile_for(device)
+    if (device.type == "cuda" and "no table entry" in profile.name
+            and not (args.calibrate or args.quick_calibrate)):
+        print(f"warning: no cost-model entry for {profile.name}. Falling back to "
+              "A100 constants, which will be wrong for this card. Re-run with "
+              "--calibrate to measure them.\n", file=sys.stderr)
     if (args.calibrate or args.quick_calibrate) and device.type == "cuda":
         from .calibrate import calibrate, report
 

@@ -115,11 +115,15 @@ before it as producers and the affine transform after it as an epilogue.
 ## First run on a GPU
 
 ```
-pip install torch triton
-pytest tests/
-python -m mlc run bert-base --device cuda
-python -m mlc.bench --calibrate --models gpt-small --batches 1
+pip install torch pytest numpy      # Triton comes with torch on Linux
+bash scripts/gpu_check.sh           # tests, then every model through Triton
+bash scripts/gpu_bench.sh           # the sweep, once the above passes
 ```
+
+`gpu_check.sh` logs to `gpu_check.log`: versions, the test suite, each model
+compiled and executed through Triton and checked against eager, the CUDA graph
+path at batch 32, the streamed reduction path, and a calibration of the cost
+model constants. It is the file to send if anything fails.
 
 On a consumer card fp32 is the weak path, so `--dtype float16` is the
 realistic configuration:

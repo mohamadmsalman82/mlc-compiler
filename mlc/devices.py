@@ -105,19 +105,35 @@ def _spec(name, gb_s, tflops, launch_us, l2_mb, mem_gb) -> DeviceProfile:
 
 
 TABLE: list[tuple[str, DeviceProfile]] = [
-    ("4060 Ti",     _spec("RTX 4060 Ti",     288,  22.06, 3.5, 32,  8)),
-    ("4060 Laptop", _spec("RTX 4060 Laptop", 256,  11.61, 4.0, 24,  8)),
-    ("4060",        _spec("RTX 4060",        272,  15.11, 3.5, 24,  8)),
-    ("4070",        _spec("RTX 4070",        504,  29.15, 3.5, 36, 12)),
-    ("4080",        _spec("RTX 4080",        717,  48.74, 3.0, 64, 16)),
-    ("4090",        _spec("RTX 4090",       1008,  82.58, 3.0, 72, 24)),
-    ("3090",        _spec("RTX 3090",        936,  35.58, 3.5,  6, 24)),
-    ("3080",        _spec("RTX 3080",        760,  29.77, 3.5,  5, 10)),
-    ("A100",        _spec("A100",           1555,  19.49, 3.0, 40, 40)),
-    ("H100",        _spec("H100",           3350,  66.91, 2.5, 50, 80)),
-    ("L4",          _spec("L4",              300,  30.29, 3.5, 48, 24)),
-    ("T4",          _spec("T4",              320,   8.14, 4.0,  4, 16)),
-    ("V100",        _spec("V100",            900,  15.67, 3.5,  6, 16)),
+    # Most specific first. A key that is a substring of a later one shadows
+    # it: "A40" sits inside "RTX A4000", so the workstation cards have to be
+    # listed before the bare datacenter names. test_table_is_ordered_most_
+    # specific_first enforces this, and caught exactly that pair.
+    ("4060 Ti",      _spec("RTX 4060 Ti",      288,  22.06, 3.5, 32,  8)),
+    ("4060 Laptop",  _spec("RTX 4060 Laptop",  256,  11.61, 4.0, 24,  8)),
+    ("4060",         _spec("RTX 4060",         272,  15.11, 3.5, 24,  8)),
+    ("4070",         _spec("RTX 4070",         504,  29.15, 3.5, 36, 12)),
+    ("4080",         _spec("RTX 4080",         717,  48.74, 3.0, 64, 16)),
+    ("4090",         _spec("RTX 4090",        1008,  82.58, 3.0, 72, 24)),
+    ("3090",         _spec("RTX 3090",         936,  35.58, 3.5,  6, 24)),
+    ("3080",         _spec("RTX 3080",         760,  29.77, 3.5,  5, 10)),
+    ("RTX 6000 Ada", _spec("RTX 6000 Ada",     960,  91.06, 3.0, 96, 48)),
+    ("RTX 5000 Ada", _spec("RTX 5000 Ada",     576,  65.28, 3.0, 64, 32)),
+    ("RTX 4000 Ada", _spec("RTX 4000 Ada",     360,  26.73, 3.5, 48, 20)),
+    ("RTX A6000",    _spec("RTX A6000",        768,  38.71, 3.0,  6, 48)),
+    ("RTX A5000",    _spec("RTX A5000",        768,  27.77, 3.5,  6, 24)),
+    ("RTX A4500",    _spec("RTX A4500",        640,  23.65, 3.5,  6, 20)),
+    ("RTX A4000",    _spec("RTX A4000",        448,  19.17, 3.5,  4, 16)),
+    ("A100",         _spec("A100",            1555,  19.49, 3.0, 40, 40)),
+    ("H100",         _spec("H100",            3350,  66.91, 2.5, 50, 80)),
+    ("A40",          _spec("A40",              696,  37.42, 3.0,  6, 48)),
+    ("A10G",         _spec("A10G",             600,  31.52, 3.5,  6, 24)),
+    ("A10",          _spec("A10",              600,  31.24, 3.5,  6, 24)),
+    ("L40S",         _spec("L40S",             864,  91.61, 3.0, 96, 48)),
+    ("L40",          _spec("L40",              864,  90.52, 3.0, 96, 48)),
+    ("L4",           _spec("L4",               300,  30.29, 3.5, 48, 24)),
+    ("T4",           _spec("T4",               320,   8.14, 4.0,  4, 16)),
+    ("V100",         _spec("V100",             900,  15.67, 3.5,  6, 16)),
 ]
 
 #: What Config() uses when nothing is known. Deliberately an A100, because
