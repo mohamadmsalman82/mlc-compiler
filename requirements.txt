@@ -1,0 +1,5 @@
+torch>=2.4
+# GPU only. Installed as a torch dependency on Linux+CUDA; unavailable on macOS.
+triton>=3.0 ; platform_system == "Linux"
+pytest>=8.0
+numpy
