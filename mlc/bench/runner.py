@@ -216,9 +216,9 @@ def format_table(results: list[Result]) -> str:
 
     out: list[str] = []
     for key, rows in groups.items():
-        model, batch, seq = key
+        model, batch, seq, dtype = key
         base = next((r for r in rows if r.variant == "eager" and r.ok), None)
-        out.append(f"\n### {model}  batch={batch}  seq={seq}\n")
+        out.append(f"\n### {model}  dtype={dtype}  batch={batch}  seq={seq}\n")
         out.append("| variant | kernels | latency ms | vs eager | peak MB | max err |")
         out.append("|---|---:|---:|---:|---:|---:|")
         for r in rows:

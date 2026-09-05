@@ -57,6 +57,12 @@ def main(argv=None) -> int:
     results = run_suite(args.models, args.batches, args.seq, device,
                         args.variants, iters=args.iters, base=base,
                         dtype=getattr(torch, args.dtype))
+    # Save the measurements before formatting them. Timing a sweep costs
+    # minutes of GPU time and a bug in the report should never be able to
+    # throw that away, which it did twice before this line existed.
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.with_suffix(".json").write_text(to_json(results))
     table = format_table(results)
     header = (f"# Benchmarks\n\ndevice: `{device}`"
               + (f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else "")
